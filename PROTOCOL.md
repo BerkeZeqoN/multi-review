@@ -149,7 +149,8 @@ only when the round log says what was checked, with evidence.
      area/files you researched this tick.
 4. Your own research is due **every tick**, changed files or not (except
    `YOUR_TASK=verify-only`). Found nothing → log what you checked and how
-   (`Taze tarama: src/auth/*, grep -n token → temiz`). Never write
+   as a round-log line (`- Tur 4 (10:20): Taze tarama: src/auth/*, grep -n token → temiz`).
+   Only such lines under `## Tur gunlugu` count as a clean pass. Never write
    "degisiklik yok" and stop. `WORK_WARNING` in the `wait` line means you
    skipped this for 2 ticks: fix it first.
 5. Run `wait` again. Never end your turn between ticks while the session is
@@ -247,7 +248,8 @@ anything not carried into `final.md` is gone.
 3. **Not the final writer:** run `done --agent NAME` once you have reviewed
    `final.md`. `done` refuses with `WAITING_FOR_FINAL` while there is no draft
    (the user ran `stop` before a `final_phase` tick): the final writer drafts
-   it now; re-run `wait`-free, e.g. after a minute, read it, object, then `done`. Your file will be deleted
+   it now. Try `done` again after a minute; once the draft exists, read it,
+   object if needed, then run `done`. Your file will be deleted
    by `finalize`; everything that matters must already be in `final.md` or in
    your objections.
 4. **Final writer:** read every `## final.md itirazlari`, fix `final.md` (or

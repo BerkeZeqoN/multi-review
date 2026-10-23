@@ -307,6 +307,18 @@ class WorkModes(TempProject):
         self.assertIn("clean_scans=1", line)
         self.assertNotIn("WORK_WARNING", line)
 
+    def test_quoted_scan_outside_round_log_does_not_count(self):
+        # CO-003: quoting the protocol example in a review is not research.
+        self.create()
+        own = self.root / m.DIR_NAME / "c.md"
+        text = own.read_text().replace(
+            "## Bana gelen itirazlara cevap",
+            "- A-002: KISMEN - ornek `Taze tarama: src/auth/*` sadece aniliyor\n"
+            "- Tur 9 (10:00): Taze tarama: x -> temiz (alinti, log degil)\n\n## Bana gelen itirazlara cevap")
+        own.write_text(text)
+        self.assertEqual(m.count_findings(str(self.root), m.load_session(str(self.root))["agents"]["claude"]),
+                         (0, 0))
+
     def test_review_mode_only_lead_must_research(self):
         self.create(work_mode="review")
         self.join("codex")

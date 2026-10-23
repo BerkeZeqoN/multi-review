@@ -450,17 +450,30 @@ def must_research(session, agent):
     return session.get("work_mode", "research") != "review" or agent == work_lead(session)
 
 
-# A logged clean pass ("Taze tarama: src/auth/*, grep -n token -> temiz") counts as research too.
-SCAN_RE = re.compile(r"^\s*-?\s*.{0,40}?Taze tarama\s*:", re.M | re.I)
+# A logged clean pass counts as research too, but only as a round-log entry
+# ("- Tur 8 (16:20): Taze tarama: src/auth/*, grep -n token -> temiz"), not a quote in a review.
+SCAN_RE = re.compile(r"^- Tur [^\n]*?Taze tarama\s*:", re.M | re.I)
+LOG_HEADING = "## Tur gunlugu"
+
+
+def round_log(text):
+    """The `## Tur gunlugu` section of an agent file (up to the next `## ` heading)."""
+    start = text.find(LOG_HEADING)
+    if start < 0:
+        return ""
+    body = text[start + len(LOG_HEADING):]
+    nxt = re.search(r"^## ", body, re.M)
+    return body[:nxt.start()] if nxt else body
 
 
 def count_findings(root, info):
-    """(own finding headings, logged clean passes) in the agent's file."""
+    """(own finding headings, logged clean passes in the round log) in the agent's file."""
     f = review_dir(root) / info["file"]
     if not f.exists():
         return 0, 0
     text = f.read_text(encoding="utf-8", errors="replace")
-    return len(re.findall(rf"^### {re.escape(info['prefix'])}-\d+", text, re.M)), len(SCAN_RE.findall(text))
+    findings = len(re.findall(rf"^### {re.escape(info['prefix'])}-\d+", text, re.M))
+    return findings, len(SCAN_RE.findall(round_log(text)))
 
 
 def work_check(root, session, agent):
