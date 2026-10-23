@@ -29,7 +29,7 @@ Commands (run from the project root, or pass --root):
           model: each round pipes a prompt into CMD (stdin) and writes the
           returned markdown into the agent's own file
 """
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 import argparse
 import json
@@ -110,8 +110,30 @@ def stamp(ts):
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def review_dir(root):
-    d = Path(root).resolve() / DIR_NAME
+# Named sessions: several reviews can run at once, also in the same project. "main" keeps the
+# original layout (<root>/multi-review/); any other name lives in <root>/multi-review/<name>/.
+DEFAULT_SESSION = "main"
+SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+SESSION = DEFAULT_SESSION  # the session every path helper uses; set once by main() / set_session()
+
+
+def set_session(name):
+    global SESSION
+    name = (name or DEFAULT_SESSION).strip().lower()
+    if not SESSION_RE.match(name) or name == STATE_DIR.lstrip("."):
+        sys.exit("ERROR: --session must be lowercase [a-z0-9_-], 1-32 chars, e.g. security")
+    SESSION = name
+    return name
+
+
+def session_rel(session=None):
+    """Folder of a session relative to the project root, e.g. multi-review or multi-review/security."""
+    session = session or SESSION
+    return DIR_NAME if session == DEFAULT_SESSION else f"{DIR_NAME}/{session}"
+
+
+def review_dir(root, session=None):
+    d = Path(root).resolve() / session_rel(session)
     (d / STATE_DIR).mkdir(parents=True, exist_ok=True)
     return d
 
@@ -145,21 +167,30 @@ def is_active(session, now=None):
     return bool(session) and not session.get("stopped") and session["end"] > now
 
 
-def peek_session(root):
+def peek_session(root, session=None):
     """Read a session without creating any folder (used while resolving the root)."""
     try:
-        return load_json(Path(root).resolve() / DIR_NAME / STATE_DIR / "session.json")
+        return load_json(Path(root).resolve() / session_rel(session) / STATE_DIR / "session.json")
     except (OSError, ValueError):
         return None
 
 
+def registry_entries():
+    try:
+        return load_json(REGISTRY, []) or []
+    except (OSError, ValueError):
+        return []
+
+
 def registry_active():
     """Active sessions from the machine-wide registry; dead entries are dropped."""
-    try:
-        entries = load_json(REGISTRY, [])
-    except (OSError, ValueError):
-        entries = []
-    return [e for e in entries if is_active(peek_session(e["root"]))]
+    out = []
+    for e in registry_entries():
+        e.setdefault("session", DEFAULT_SESSION)  # entries written before named sessions
+        s = peek_session(e["root"], e["session"])
+        if is_active(s):
+            out.append(dict(e, goal=s.get("goal"), end=s["end"]))
+    return out
 
 
 def registry_lock():
@@ -168,35 +199,77 @@ def registry_lock():
     return Lock(path=REGISTRY.with_suffix(".lock"))
 
 
+def same_session(e, root, session):
+    return e["root"].lower() == root.lower() and e.get("session", DEFAULT_SESSION) == session
+
+
 def registry_add(root):
     root = str(Path(root).resolve())
     with registry_lock():
-        entries = [e for e in registry_active() if e["root"].lower() != root.lower()]
-        entries.append({"root": root, "created": stamp(time.time())})
+        entries = [{"root": e["root"], "session": e["session"], "created": e.get("created")}
+                   for e in registry_active() if not same_session(e, root, SESSION)]
+        entries.append({"root": root, "session": SESSION, "created": stamp(time.time())})
         save_json(REGISTRY, entries)
 
 
 def registry_prune():
     if REGISTRY.exists():
         with registry_lock():
-            save_json(REGISTRY, registry_active())
+            save_json(REGISTRY, [{"root": e["root"], "session": e["session"], "created": e.get("created")}
+                                 for e in registry_active()])
 
 
-def resolve_root(arg):
-    """--root wins; else an active session in cwd; else the single active session in the registry."""
+def cwd_sessions(cwd):
+    """Active sessions rooted in cwd: the registry's, plus an unregistered main session."""
+    found = [e for e in registry_active() if e["root"].lower() == str(cwd).lower()]
+    main = peek_session(cwd, DEFAULT_SESSION)
+    if is_active(main) and not any(e["session"] == DEFAULT_SESSION for e in found):
+        found.append({"root": str(cwd), "session": DEFAULT_SESSION, "goal": main.get("goal"), "end": main["end"]})
+    return found
+
+
+def pick_one(cands, what):
+    if len(cands) == 1:
+        return cands[0]
+    if len(cands) > 1:
+        now = time.time()
+        rows = "\n".join(f"  --root \"{e['root']}\" --session {e['session']}   "
+                         f"goal=\"{e.get('goal') or '-'}\"   left={fmt(e['end'] - now)}" for e in cands)
+        sys.exit(f"MULTIPLE_SESSIONS: more than one {what} is active; ask the user which one, then pass "
+                 f"--root and --session:\n{rows}")
+    return None
+
+
+def resolve_root(arg, session=None):
+    """Pick (root, session). --root/--session narrow the search; else the single active session in cwd,
+    else the single active one in the registry. Nothing active: cwd + the given or default session."""
+    cwd = str(Path.cwd().resolve())
     if arg:
-        return str(Path(arg).resolve())
-    cwd = Path.cwd()
-    if is_active(peek_session(cwd)):
-        return str(cwd)
-    active = registry_active()
-    if len(active) == 1:
-        print(f"ROOT={active[0]['root']} (found in {REGISTRY})")
-        return active[0]["root"]
-    if len(active) > 1:
-        roots = "\n".join(f"  --root \"{e['root']}\"" for e in active)
-        sys.exit(f"MULTIPLE_SESSIONS: more than one review is active; pick one:\n{roots}")
-    return str(cwd)
+        root = str(Path(arg).resolve())
+        if session:
+            return root, session
+        hit = pick_one(cwd_sessions(root), f"session in {root}")
+        return root, (hit["session"] if hit else DEFAULT_SESSION)
+    if session:
+        hit = pick_one([e for e in registry_active() if e["session"] == session], f"session named '{session}'")
+        if hit:
+            print(f"ROOT={hit['root']} (found in {REGISTRY})")
+            return hit["root"], session
+        return cwd, session
+    hit = pick_one(cwd_sessions(cwd), "session in this folder")
+    if hit:
+        return cwd, hit["session"]
+    hit = pick_one(registry_active(), "review")
+    if hit:
+        print(f"ROOT={hit['root']} SESSION={hit['session']} (found in {REGISTRY})")
+        return hit["root"], hit["session"]
+    return cwd, DEFAULT_SESSION
+
+
+def next_cmd(root, rest):
+    """The exact next command, so an agent never drops --session and lands in another review."""
+    sess = f" --session {SESSION}" if SESSION != DEFAULT_SESSION else ""
+    return f"NEXT: python \"{Path(__file__).resolve()}\" --root \"{Path(root).resolve()}\"{sess} {rest}"
 
 
 def active_agents(session):
@@ -528,7 +601,7 @@ def print_roster(root, session, me=None):
             flags.append("STALE")
         if name == me:
             flags.append("YOU")
-        print(f"  - {name:<14} prefix={a['prefix']:<4} file={DIR_NAME}/{a['file']:<20} "
+        print(f"  - {name:<14} prefix={a['prefix']:<4} file={session_rel()}/{a['file']:<20} "
               f"mode={a.get('mode', 'agent'):<6} joined={stamp(a['joined'])} "
               f"seen={fmt(now - last_seen(root, session, name))}_ago"
               f"{' [' + ','.join(flags) + ']' if flags else ''}")
@@ -591,8 +664,16 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
             if session.get("areas"):
                 print(f"AREAS={','.join(session['areas'])}")
         else:
-            print(f"JOINED existing session (started {stamp(session['start'])}, "
-                  f"order_mode={session['order_mode']}; your --interval/--duration/--order-mode are ignored)")
+            creator_only = [o for o, v in (("--interval", interval), ("--duration", duration),
+                                           ("--order-mode", order_mode), ("--work-mode", work_mode),
+                                           ("--areas", areas), ("--goal", goal)) if v]
+            if creator_only:
+                # These would be silently dropped: the user meant a new review, not this one.
+                sys.exit(f"SESSION_EXISTS: session '{SESSION}' is already active in {Path(root).resolve()} "
+                         f"(goal={session.get('goal') or '-'}). To join it, drop {' '.join(creator_only)}. "
+                         "To run another review at the same time, add --session <new-name>.")
+            print(f"JOINED existing session '{SESSION}' (started {stamp(session['start'])}, "
+                  f"order_mode={session['order_mode']}, work_mode={session.get('work_mode', 'research')})")
         agents = session.setdefault("agents", {})
         if agent in agents:
             info = agents[agent]
@@ -628,10 +709,11 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
         print(f"created {own}")
     # Baseline: the first TICK only reports changes that appear after joining.
     snapshot(root, session, agent)
-    print(f"ROOT={Path(root).resolve()}")
+    print(f"ROOT={Path(root).resolve()} SESSION={SESSION} DIR={session_rel()}")
     print(f"YOU={agent} prefix={info['prefix']} own_file={own}")
     print_clock(session)
     print_roster(root, session, me=agent)
+    print(next_cmd(root, f"wait --agent {agent}"))
     return session, info
 
 
@@ -739,7 +821,7 @@ def in_final_phase(session, now=None):
 
 
 def over_line(session):
-    return f"SESSION_OVER final_writer={final_writer(session) or '-'} final_file={DIR_NAME}/{FINAL_FILE}"
+    return f"SESSION_OVER final_writer={final_writer(session) or '-'} final_file={session_rel()}/{FINAL_FILE}"
 
 
 def cmd_wait(args):
@@ -749,6 +831,8 @@ def cmd_wait(args):
     session = load_session(args.root)
     print_clock(session)
     print_roster(args.root, session, me=args.agent)
+    print(next_cmd(args.root, f"wait --agent {args.agent}" if line.startswith(("TICK", "CONTINUE"))
+                   else f"done --agent {args.agent}   (final writer: finalize --agent {args.agent})"))
 
 
 def cmd_propose(args):
@@ -919,7 +1003,7 @@ def cmd_finalize(args):
         save_json(session_path(root), session)
     registry_prune()
     verb = f"archived to {dest}" if args.archive else "deleted"
-    print(f"FINALIZED {DIR_NAME}/{FINAL_FILE}; {len(others)} other md file(s) {verb}: "
+    print(f"FINALIZED {session_rel()}/{FINAL_FILE}; {len(others)} other md file(s) {verb}: "
           f"{', '.join(f.name for f in others) or '-'}")
 
 
@@ -1055,7 +1139,7 @@ def build_prompt(root, session, agent, info, round_label, tick_line, max_chars):
     # lowest rank is shrunk first. The own file is never cut: the model rewrites it whole.
     sections = [
         ("You are one agent in a multi-agent mutual code review. Follow the protocol strictly.", None),
-        (f"YOUR NAME: {agent}\nYOUR PREFIX: {info['prefix']}\nYOUR FILE: {DIR_NAME}/{info['file']}\n"
+        (f"YOUR NAME: {agent}\nYOUR PREFIX: {info['prefix']}\nYOUR FILE: {session_rel()}/{info['file']}\n"
          f"GOAL (from the user; prioritise it): {session.get('goal') or '-'}\n"
          f"ROUND: {round_label}\nCLOCK: {tick_line}\nNOW: {stamp(time.time())}\n"
          f"WORK_MODE: {session.get('work_mode', 'research')} YOUR_TASK: {your_task(session, agent)}\n"
@@ -1069,7 +1153,7 @@ def build_prompt(root, session, agent, info, round_label, tick_line, max_chars):
     ]
     for name, text in other_texts.items():
         sections.append((f"{' + '.join(roles[name])} - AGENT '{name}' FILE "
-                         f"{DIR_NAME}/{others[name]['file']}:\n{text}", 4))
+                         f"{session_rel()}/{others[name]['file']}:\n{text}", 4))
     sections.append(("CODE AT REFERENCED path:line LOCATIONS:\n" + (snippets or "(none)"), 2))
     sections.append((f"YOUR CURRENT FILE:\n{own_text}", None))
     sections.append((
@@ -1164,7 +1248,7 @@ def final_prompt(root, session, max_chars):
     protocol = head(Path(__file__).resolve().parent.parent / "PROTOCOL.md", lines=400, max_chars=20000)
     sections = [
         ("You are the FINAL WRITER of a multi-agent code review. Merge the agents' files below into "
-         f"{DIR_NAME}/{FINAL_FILE}, following the protocol's 'Final phase' section exactly: only findings "
+         f"{session_rel()}/{FINAL_FILE}, following the protocol's 'Final phase' section exactly: only findings "
          "every reviewer agreed on (ortak kabul) go under the fixes heading, merged and sorted by severity; "
          "disputed ones under 'Tartismali'; retracted/rejected ones one line each under 'Kapsam disi'.", None),
         (f"GOAL: {session.get('goal') or '-'}", None),
@@ -1173,7 +1257,7 @@ def final_prompt(root, session, max_chars):
     for name, a in active_agents(session).items():
         f = rd / a["file"]
         text = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
-        sections.append((f"AGENT '{name}' FILE {DIR_NAME}/{a['file']}:\n{squeeze(text, OTHER_FILE_CAP)}", 2))
+        sections.append((f"AGENT '{name}' FILE {session_rel()}/{a['file']}:\n{squeeze(text, OTHER_FILE_CAP)}", 2))
     sections.append((f"TASK: output the COMPLETE {FINAL_FILE} (it must contain '{FINAL_HEADING}'), between a "
                      f"line '{BEGIN_MARK}' and a line '{END_MARK}'.", None))
     return fit_sections(sections, max_chars)
@@ -1257,12 +1341,22 @@ def main():
     d.add_argument("--exec", required=True, help="shell command that reads the prompt on stdin, prints the answer")
     d.add_argument("--call-timeout", default="15m")
     d.add_argument("--max-chars", type=int, default=200000, help="prompt size cap (shrink for small local models)")
+    p.add_argument("--session", help=f"session name, to run several reviews at once (default: {DEFAULT_SESSION}; "
+                                      "when joining: the single active one)")
+    for sp in sub.choices.values():
+        # Accept --root/--session after the subcommand too; SUPPRESS keeps a value given before it.
+        sp.add_argument("--root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        sp.add_argument("--session", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     args = p.parse_args()
+    session = set_session(args.session) if args.session else None
     creating = args.cmd in ("join", "drive") and bool(getattr(args, "interval", None))
-    if creating and not args.root and not is_active(peek_session(Path.cwd())) and registry_active():
-        # Creating while another review runs elsewhere: never join that one by accident.
-        args.root = str(Path.cwd())
-    args.root = resolve_root(args.root)
+    if creating:
+        # Creating: here (or --root), under the given name; never join another review by accident.
+        args.root = str(Path(args.root or Path.cwd()).resolve())
+        set_session(session)
+    else:
+        args.root, session = resolve_root(args.root, session)
+        set_session(session)
     {"join": cmd_join, "wait": cmd_wait, "propose": cmd_propose, "shuffle": cmd_shuffle,
      "roster": cmd_roster, "status": cmd_status, "leave": cmd_leave, "stop": cmd_stop,
      "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive}[args.cmd](args)

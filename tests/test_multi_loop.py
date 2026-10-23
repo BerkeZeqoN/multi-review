@@ -168,8 +168,12 @@ class Joining(TempProject):
         _, out = self.create(goal="  repo quality  ")
         self.assertEqual(m.load_session(str(self.root))["goal"], "repo quality")
         self.assertIn("GOAL=repo quality", out)
-        _, out = self.join("codex", goal="ignored for joiners")
+        _, out = self.join("codex")
         self.assertIn("GOAL=repo quality", out)
+        # C-017: creator-only options on an active session are an error, not silently dropped.
+        with self.assertRaises(SystemExit) as cm:
+            self.join("gemini", goal="security")
+        self.assertIn("SESSION_EXISTS", str(cm.exception.code))
 
     def test_custom_file_and_prefix(self):
         (_, info), _ = self.create(file="claude-opus.md", prefix="cl")
@@ -354,6 +358,65 @@ class WorkModes(TempProject):
         (self.root / "setup.cfg").write_text("x")
         self.create(work_mode="split")
         self.assertEqual(m.load_session(str(self.root))["areas"], ["docs/", "src/", "(root files)"])
+
+
+class MultiSession(TempProject):
+    """Several reviews at once: named sessions, in one project or across projects."""
+
+    def tearDown(self):
+        m.set_session(m.DEFAULT_SESSION)
+        super().tearDown()
+
+    def in_session(self, name, fn, *a, **kw):
+        m.set_session(name)
+        return fn(*a, **kw)
+
+    def test_two_sessions_in_one_project_are_isolated(self):
+        self.in_session("main", self.create)
+        self.in_session("security", self.create, goal="security")
+        rd = self.root / m.DIR_NAME
+        self.assertTrue((rd / "c.md").exists())
+        self.assertTrue((rd / "security" / "c.md").exists())
+        m.set_session("main")
+        self.assertIsNone(m.load_session(str(self.root)).get("goal"))
+        m.set_session("security")
+        self.assertEqual(m.load_session(str(self.root))["goal"], "security")
+        m.set_session("main")
+        self.assertEqual(sorted(p.name for p in rd.glob("*.md")), ["c.md"])  # main never sees security's files
+
+    def test_join_without_session_is_ambiguous_then_named(self):
+        self.in_session("main", self.create)
+        self.in_session("docs", self.create, goal="docs")
+        import os
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                quiet(m.resolve_root, None)
+            self.assertIn("MULTIPLE_SESSIONS", str(cm.exception.code))
+            self.assertIn("--session docs", str(cm.exception.code))
+            self.assertIn('goal="docs"', str(cm.exception.code))
+            self.assertEqual(m.resolve_root(None, "docs"), (str(self.root.resolve()), "docs"))
+        finally:
+            os.chdir(old)
+
+    def test_session_name_found_across_projects(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        m.set_session("api")
+        quiet(m.do_join, str(other), "claude", "5m", "1h", order_mode="random")
+        root, sess = quiet(m.resolve_root, None, "api")[0]
+        self.assertEqual((root, sess), (str(other.resolve()), "api"))
+
+    def test_next_line_carries_session(self):
+        _, out = self.in_session("security", self.create)
+        self.assertIn("SESSION=security DIR=multi-review/security", out)
+        self.assertRegex(out, r"NEXT: python .* --session security wait --agent claude")
+
+    def test_bad_session_name(self):
+        for bad in ("Has Space", "../x", "state", "x" * 40):
+            with self.assertRaises(SystemExit, msg=bad):
+                m.set_session(bad)
 
 
 class Liveness(TempProject):

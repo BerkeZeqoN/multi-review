@@ -41,6 +41,13 @@ class Installer(unittest.TestCase):
         self.assertEqual(got, sorted(install.FILES))
         self.assertFalse((self.home / ".codex").exists())  # codex not installed -> untouched
 
+    def test_claude_gets_the_join_command(self):
+        self.run_main()
+        cmd = self.home / ".claude" / "commands" / "multi-review-join.md"
+        self.assertTrue(cmd.is_file())
+        self.run_main("--uninstall")
+        self.assertFalse(cmd.exists())
+
     def test_update_backs_up_outside_skills(self):
         self.run_main()
         (self.dest / "stale.txt").write_text("old")

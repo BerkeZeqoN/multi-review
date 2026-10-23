@@ -56,6 +56,11 @@ python SCRIPT finalize --agent NAME                  # final writer only: keep f
 python SCRIPT finalize --agent NAME --archive        # same, but move the rest to .state/archive/
 ```
 
+Several reviews can run at once: every command takes `--session NAME`
+(default `main`, folder `multi-review/`; others `multi-review/<name>/`).
+**Always run the `NEXT:` command that `join`/`wait` print**: it carries the
+right `--root`/`--session`, so you never wait on another agent's review.
+
 Durations: `30s`, `5m`, `10dk`, `2h`, `2sa`, `1h30m`; bare number = minutes.
 Add `multi-review/` to `.gitignore` in git repos.
 

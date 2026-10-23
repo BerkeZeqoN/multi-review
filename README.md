@@ -46,11 +46,8 @@ Then, in Claude Code:
 /multi-review "D:/my-project" 5m 2h is it release ready?
 ```
 
-In every other agent (Codex, Antigravity, ...):
-
-```text
-/multi-review join
-```
+In every other agent: `/multi-review-join` (Claude Code), or `/multi-review join`
+/ "join the multi-review session" (Codex, Antigravity, ...).
 
 Tools without a skill system get one sentence instead:
 
@@ -120,6 +117,7 @@ python install.py`. Requires Python 3.8+ and nothing else.
 | `python $S wait --agent codex` | block until the next tick (add `--max-wait 9m` for tools with command timeouts) |
 | `python $S propose --agent codex --order claude,codex,gemini` | vote for a ring order |
 | `python $S roster` / `python $S status` | ring, roles, clock |
+| `python $S --session security join --agent claude --interval 5m --duration 1h --order-mode random` | a second, named review next to the first |
 | `python $S leave --agent codex` | leave early |
 | `python $S stop` | end the session for everyone |
 | `python $S done --agent codex` | after `SESSION_OVER`: your final round is done |
@@ -130,8 +128,17 @@ Durations: `30s`, `5m`, `10dk`, `2h`, `2sa`, `1h30m`. A bare number means minute
 
 ## FAQ
 
-**`MULTIPLE_SESSIONS`?** Two reviews are active on this machine. Pass
-`--root <project>` to pick one.
+**Can several reviews run at once?** Yes. Name them: `--session security`,
+`--session docs`, in one project or many. Each lives in `multi-review/<name>/`
+with its own `final.md`. Every `join`/`wait` prints a `NEXT:` command with the
+right `--root`/`--session`.
+
+**`MULTIPLE_SESSIONS`?** More than one review matches. The message lists name,
+goal, project and time left; pass `--root` and `--session` to pick one.
+
+**`SESSION_EXISTS`?** You passed creation options (`--interval`, `--goal`, ...)
+while that session is already running. Drop them to join, or add
+`--session <new-name>` to start another review.
 
 **`ERROR: 'claude' is already active`?** Another process uses that name. If
 it is you after `/clear`, add `--resume`. Otherwise pick `claude-2`.

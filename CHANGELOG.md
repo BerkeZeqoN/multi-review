@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-23
+
+### Added
+- **Several sessions at once** (`--session NAME`, default `main`): two reviews
+  of the same project or of different projects run side by side. Each named
+  session lives in `multi-review/<name>/` with its own state and `final.md`.
+  `MULTIPLE_SESSIONS` lists name, goal, project and time left. `--session`
+  alone finds that name in any project.
+- `NEXT:` line after `join` and `wait`: the exact next command, with
+  `--root`/`--session`.
+- `/multi-review-join` command for Claude Code (installed by `install.py`): a
+  thin router to the skill's join path, no questions asked.
+- Heartbeat: `seen=<age>_ago`, `[STALE]` and `STALE_AGENTS=` for agents whose
+  loop stopped. `now=` in the clock line.
+
+### Changed
+- Creation options (`--interval`, `--goal`, `--work-mode`, ...) on an already
+  active session are an error (`SESSION_EXISTS`). Before, they were silently
+  ignored.
+- `done` waits for the `final.md` draft (`WAITING_FOR_FINAL`). Drive-only
+  sessions get a final writer and a lead.
+
 ## [0.3.0] - 2026-10-23
 
 ### Added
@@ -57,6 +79,7 @@ All notable changes to this project are documented here. The format follows
 - First public version: N-agent review ring, shared clock, random or
   negotiated ring order, `drive` for text-only models.
 
-[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/BerkeZeqoN/multi-review/releases/tag/v0.1.0

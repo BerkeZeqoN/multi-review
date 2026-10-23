@@ -20,6 +20,12 @@ from pathlib import Path
 NAME = "multi-review"
 REPO = Path(__file__).resolve().parent
 FILES = ["SKILL.md", "PROTOCOL.md", "scripts/multi_loop.py"]
+# Thin slash-command routers (the rules stay in SKILL.md/PROTOCOL.md), only for tools that load them.
+COMMANDS = {"claude": ["commands/multi-review-join.md"]}
+
+
+def command_dir(tool):
+    return {"claude": HOME / ".claude" / "commands"}.get(tool)
 HOME = Path.home()
 # tool -> (folder that proves the tool is installed, skill directory)
 TOOLS = {
@@ -75,7 +81,22 @@ def install(tool, dest, dry):
             print(f"{'':<12} warning: could not remove leftover {path} ({e})")
 
 
+def install_commands(tool, dry):
+    for rel in COMMANDS.get(tool, []):
+        target = command_dir(tool) / Path(rel).name
+        print(f"{'':<12} {'command':<24} {target}")
+        if not dry:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO / rel, target)
+
+
 def uninstall(tool, dest, dry):
+    for rel in COMMANDS.get(tool, []):
+        target = command_dir(tool) / Path(rel).name
+        if target.exists():
+            print(f"{tool:<12} {'remove command':<24} {target}")
+            if not dry:
+                target.unlink()
     if not dest.exists():
         print(f"{tool:<12} {'not installed':<24} {dest}")
         return
@@ -93,7 +114,7 @@ def main():
     p.add_argument("--uninstall", action="store_true")
     p.add_argument("--list", action="store_true")
     args = p.parse_args()
-    missing = [f for f in FILES if not (REPO / f).is_file()]
+    missing = [f for f in FILES + [c for cs in COMMANDS.values() for c in cs] if not (REPO / f).is_file()]
     if missing:
         sys.exit(f"ERROR: run this from a full checkout; missing {missing}")
     if args.list:
@@ -105,7 +126,11 @@ def main():
     if not tools:
         sys.exit("No supported tool found (~/.claude, ~/.gemini, ~/.codex, ~/.agents). Use --target to force one.")
     for tool, (_, dest) in tools.items():
-        (uninstall if args.uninstall else install)(tool, dest, args.dry_run)
+        if args.uninstall:
+            uninstall(tool, dest, args.dry_run)
+        else:
+            install(tool, dest, args.dry_run)
+            install_commands(tool, args.dry_run)
     if args.dry_run:
         print("(dry run, nothing changed)")
 

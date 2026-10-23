@@ -85,10 +85,28 @@ python SCRIPT join --agent gemini --file gemini-pro.md --prefix GP   # choose yo
 Each agent decides its own md file name with `--file` (and id prefix with
 `--prefix`); without them the defaults below apply.
 
-Root lookup (no `--root`): active session in the current folder → the single
-active session in `~/.multi-review/active.json`. If several reviews run at
-once the script prints `MULTIPLE_SESSIONS` with their paths: ask the user which
-one, then pass `--root`. Never ask the user for the path when joining otherwise.
+**Joining (`/multi-review join`, or `/multi-review-join` in Claude Code)** asks
+the user nothing about interval, duration, order or work mode:
+1. `roster`. 2. `join --agent <you> --file <your-name>.md`; if your name is
+already active and that is you after lost context, add `--resume`.
+3. Work in the printed `ROOT=`; Round 0; then always run the printed `NEXT:`
+command (it carries `--root`/`--session`) in the background.
+
+**Several reviews at once.** Every session has a name (`--session`, default
+`main`). Two reviews of the same project (e.g. `security` and `docs`) or of
+different projects can run side by side; each named session lives in
+`multi-review/<name>/` with its own state and `final.md` (`main` keeps
+`multi-review/`). Create: `--session security join ... --interval ...`.
+Creation options on an already active session are an error
+(`SESSION_EXISTS`), never silently ignored. Sessions share the same code:
+parallel *fixes* in one project need separate git worktrees.
+
+Root/session lookup (no `--root`/`--session`): the single active session in
+the current folder → the single active session in `~/.multi-review/active.json`.
+`--session NAME` alone finds that name in any project. If several match the
+script prints `MULTIPLE_SESSIONS` with name, goal, path and time left per line:
+ask the user which one, then pass `--root` and `--session`. Never ask the user
+for the path when joining otherwise.
 
 Then follow PROTOCOL.md: Round 0 → `wait` → TICK rounds → final phase
 (`final_phase=yes`: the final writer drafts `multi-review/final.md`) →
