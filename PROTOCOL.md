@@ -203,7 +203,11 @@ anything not carried into `final.md` is gone.
 
 - `final_writer` (the earliest-joined agent with a terminal) writes the
   **draft** of `final.md` this tick. This is the only exception to "write only
-  your own file", and only the final writer may do it.
+  your own file", and only the final writer may do it. In a session of
+  `drive` agents only, the earliest drive agent is the writer: its driver
+  asks the model for `final.md` after the final round and runs `finalize
+  --archive` itself (archive, because no agent with a terminal reviewed it).
+  The same agent is the `review`-mode lead.
 - What goes in: every **ortak kabul** finding from every agent's file
   (not only your ring neighbours), merged when two ids describe the same
   defect, sorted by severity. TARTISMALI findings go to their own section with

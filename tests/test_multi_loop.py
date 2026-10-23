@@ -374,6 +374,30 @@ class Final(TempProject):
     def write_final(self, rd):
         (rd / m.FINAL_FILE).write_text(f"# final.md\n\n{m.FINAL_HEADING} (oncelik sirasiyla)\n\n### F-001 x\n")
 
+    def test_drive_only_session_has_a_writer_who_finalizes(self):
+        # CO-004: with no terminal agent the earliest drive agent writes final.md and finalizes.
+        self.create("qwen")
+        s = m.load_session(str(self.root))
+        s["agents"]["qwen"]["mode"] = "drive"
+        m.save_json(m.session_path(str(self.root)), s)
+        self.join("llama", mode="drive")
+        s = m.load_session(str(self.root))
+        self.assertEqual(m.final_writer(s), "qwen")
+        self.assertEqual(m.work_lead(s), "qwen")
+        quiet(m.cmd_stop, type("A", (), {"root": str(self.root)})())
+        m.mark_done(str(self.root), "llama")
+        fake = self.tmp / "fake_model.py"
+        fake.write_text("import sys\nsys.stdin.read()\n"
+                        f"print('chat\\n{m.BEGIN_MARK}\\n# final.md\\n\\n{m.FINAL_HEADING}\\n\\n### F-001 x\\n"
+                        f"{m.END_MARK}')\n")
+        args = type("A", (), {"max_chars": 50000, "exec": f'"{sys.executable}" "{fake}"', "call_timeout": "1m",
+                              "agent": "qwen"})()
+        quiet(m.drive_finalize, str(self.root), args)
+        rd = self.root / m.DIR_NAME
+        self.assertEqual(sorted(p.name for p in rd.glob("*.md")), [m.FINAL_FILE])
+        self.assertIn("F-001", (rd / m.FINAL_FILE).read_text())
+        self.assertTrue(list((rd / m.STATE_DIR / "archive").rglob("q.md")))  # archived, not deleted
+
     def test_final_name_is_reserved(self):
         with self.assertRaises(SystemExit):
             self.create(file="Final.md")

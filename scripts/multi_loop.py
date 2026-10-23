@@ -691,8 +691,11 @@ def wait_for_tick(root, agent, max_wait=None):
 
 
 def final_writer(session):
-    """Who writes final.md: the earliest-joined active agent that can run commands (not a drive agent)."""
-    cands = sorted((a["joined"], n) for n, a in active_agents(session).items() if a.get("mode") != "drive")
+    """Who writes final.md: the earliest-joined active agent that can run commands; in a session of
+    drive agents only, the earliest drive agent (its driver writes final.md and runs finalize)."""
+    agents = active_agents(session)
+    cands = sorted((a["joined"], n) for n, a in agents.items() if a.get("mode") != "drive")
+    cands = cands or sorted((a["joined"], n) for n, a in agents.items())
     return cands[0][1] if cands else None
 
 
@@ -1058,7 +1061,7 @@ def fit_sections(sections, max_chars, sep="\n\n"):
     return sep.join(texts)
 
 
-def extract_file(output):
+def extract_file(output, required="## Eksiklikler"):
     if BEGIN_MARK in output and END_MARK in output:
         body = output.split(BEGIN_MARK, 1)[1].rsplit(END_MARK, 1)[0]
     else:
@@ -1069,7 +1072,7 @@ def extract_file(output):
     fence = re.search(r"^```[\w-]*[ \t]*\n(.*)\n```[ \t]*$", body, re.S | re.M)
     if fence:
         body = fence.group(1).strip()
-    return body if "## Eksiklikler" in body else None
+    return body if required in body else None
 
 
 def run_model(root, args, agent, info, round_label, tick_line):
@@ -1103,17 +1106,65 @@ def cmd_drive(args):
     root = args.root
     _, info = do_join(root, args.agent, args.interval, args.duration, args.file, args.prefix, mode="drive",
                       order_mode=args.order_mode, resume=args.resume, goal=args.goal,
-            work_mode=args.work_mode, areas=args.areas)
+                      work_mode=args.work_mode, areas=args.areas)
     run_model(root, args, args.agent, info, "0", "round 0 (initial findings)")
     while True:
         kind, line = wait_for_tick(root, args.agent)
         print(f"[drive] {line}", flush=True)
         if kind == "SESSION_OVER":
             run_model(root, args, args.agent, info, "FINAL", line)
-            mark_done(root, args.agent)  # the final writer never waits on a drive agent
+            if final_writer(load_session(root)) == args.agent:
+                drive_finalize(root, args)  # no agent with a terminal: this driver owns final.md
+            else:
+                mark_done(root, args.agent)  # the final writer never waits on a drive agent
             break
         run_model(root, args, args.agent, info, line.split()[1], line)
     print("[drive] done", flush=True)
+
+
+def final_prompt(root, session, max_chars):
+    """Prompt for a drive final writer: merge every agent's file into final.md."""
+    rd = review_dir(root)
+    protocol = head(Path(__file__).resolve().parent.parent / "PROTOCOL.md", lines=400, max_chars=20000)
+    sections = [
+        ("You are the FINAL WRITER of a multi-agent code review. Merge the agents' files below into "
+         f"{DIR_NAME}/{FINAL_FILE}, following the protocol's 'Final phase' section exactly: only findings "
+         "every reviewer agreed on (ortak kabul) go under the fixes heading, merged and sorted by severity; "
+         "disputed ones under 'Tartismali'; retracted/rejected ones one line each under 'Kapsam disi'.", None),
+        (f"GOAL: {session.get('goal') or '-'}", None),
+        ("PROTOCOL:\n" + (protocol or "(PROTOCOL.md missing)"), 1),
+    ]
+    for name, a in active_agents(session).items():
+        f = rd / a["file"]
+        text = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        sections.append((f"AGENT '{name}' FILE {DIR_NAME}/{a['file']}:\n{squeeze(text, OTHER_FILE_CAP)}", 2))
+    sections.append((f"TASK: output the COMPLETE {FINAL_FILE} (it must contain '{FINAL_HEADING}'), between a "
+                     f"line '{BEGIN_MARK}' and a line '{END_MARK}'.", None))
+    return fit_sections(sections, max_chars)
+
+
+def drive_finalize(root, args):
+    """Drive-only session: let the model write final.md, then run finalize for it."""
+    session = load_session(root)
+    prompt = final_prompt(root, session, args.max_chars)
+    print(f"[drive] final writer: prompt {len(prompt)} chars -> {args.exec}", flush=True)
+    try:
+        res = subprocess.run(args.exec, shell=True, input=prompt, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=parse_duration(args.call_timeout),
+                             cwd=Path(root).resolve())
+        output = res.stdout
+    except subprocess.TimeoutExpired:
+        output = ""
+    body = extract_file(output, required=FINAL_HEADING)
+    if body is None:
+        backup = state_dir(root) / "backup"
+        backup.mkdir(exist_ok=True)
+        (backup / f"{args.agent}-final-raw.txt").write_text(output, encoding="utf-8")
+        print(f"[drive] final writer: invalid {FINAL_FILE}; raw saved to {backup}; review files kept", flush=True)
+        return
+    (review_dir(root) / FINAL_FILE).write_text(body + "\n", encoding="utf-8")
+    fz = argparse.Namespace(root=root, agent=args.agent, wait="10m", archive=True, force=False)
+    cmd_finalize(fz)  # archive, not delete: nobody with a terminal reviewed this final.md
 
 
 def main():
