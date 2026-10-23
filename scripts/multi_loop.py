@@ -28,6 +28,8 @@ Commands (run from the project root, or pass --root):
           model: each round pipes a prompt into CMD (stdin) and writes the
           returned markdown into the agent's own file
 """
+__version__ = "0.3.0"
+
 import argparse
 import json
 import os
@@ -1008,6 +1010,7 @@ def main():
     except (AttributeError, ValueError):
         pass
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"multi-review {__version__}")
     p.add_argument("--root", help="project root (default: active session in cwd, else the one in "
                                    "~/.multi-review/active.json)")
     sub = p.add_subparsers(dest="cmd", required=True)
