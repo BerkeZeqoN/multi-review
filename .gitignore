@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
-multi-review/.state/
+# review output of sessions run on this repo; never ship it with the skill
+multi-review/

@@ -43,6 +43,11 @@ STATE_DIR = ".state"
 REGISTRY = Path.home() / ".multi-review" / "active.json"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,60}\.md$")
+# Names that AI tools auto-load as instructions (case-insensitive file systems make claude.md == CLAUDE.md).
+# A review file with such a name would inject other agents' text into every session as instructions.
+RESERVED_FILES = {"claude.md", "claude.local.md", "agents.md", "agent.md", "gemini.md", "codex.md",
+                  "cursor.md", "copilot-instructions.md", "instructions.md", "rules.md", "readme.md",
+                  "skill.md", "protocol.md", "conventions.md"}
 BEGIN_MARK = "===BEGIN FILE==="
 END_MARK = "===END FILE==="
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "env", "__pycache__", "dist", "build",
@@ -142,20 +147,27 @@ def registry_active():
     return [e for e in entries if is_active(peek_session(e["root"]))]
 
 
-def registry_add(root):
+def registry_lock():
+    """Sessions in different projects share the registry, so its read-modify-write needs a lock too."""
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    return Lock(path=REGISTRY.with_suffix(".lock"))
+
+
+def registry_add(root):
     root = str(Path(root).resolve())
-    entries = [e for e in registry_active() if e["root"].lower() != root.lower()]
-    entries.append({"root": root, "created": stamp(time.time())})
-    save_json(REGISTRY, entries)
+    with registry_lock():
+        entries = [e for e in registry_active() if e["root"].lower() != root.lower()]
+        entries.append({"root": root, "created": stamp(time.time())})
+        save_json(REGISTRY, entries)
 
 
 def registry_prune():
     if REGISTRY.exists():
-        save_json(REGISTRY, registry_active())
+        with registry_lock():
+            save_json(REGISTRY, registry_active())
 
 
-def resolve_root(arg, creating=False):
+def resolve_root(arg):
     """--root wins; else an active session in cwd; else the single active session in the registry."""
     if arg:
         return str(Path(arg).resolve())
@@ -169,8 +181,6 @@ def resolve_root(arg, creating=False):
     if len(active) > 1:
         roots = "\n".join(f"  --root \"{e['root']}\"" for e in active)
         sys.exit(f"MULTIPLE_SESSIONS: more than one review is active; pick one:\n{roots}")
-    if creating:
-        sys.exit("NO_ACTIVE_SESSION: pass --root <project folder> to create one")
     return str(cwd)
 
 
@@ -181,8 +191,8 @@ def active_agents(session):
 class Lock:
     """Cross-process lock so two agents joining at once don't clobber session.json."""
 
-    def __init__(self, root):
-        self.path = state_dir(root) / "session.lock"
+    def __init__(self, root=None, path=None):
+        self.path = path or state_dir(root) / "session.lock"
 
     def __enter__(self):
         deadline = time.time() + 15
@@ -336,6 +346,11 @@ def try_settle(session, force=False):
     shapes = Counter(canonical(p) for p in props.values())
     if props and len(props) == len(voters(session)) and len(shapes) == 1:
         set_ring(session, next(iter(props.values())), "negotiated: unanimous")
+    elif force and props and len(shapes) > 1 and len({c for _, c in shapes.most_common(2)}) == 1:
+        # Tie at the top: picking one would favour whoever voted first, so keep the provisional order.
+        session.setdefault("ring_log", []).append(
+            {"version": session.get("ring_version", 0), "at": stamp(time.time()),
+             "reason": "negotiated: deadline, tie, provisional order kept", "ring": ring_text(session)})
     elif force and props:
         best, _ = shapes.most_common(1)[0]
         winner = next(p for p in props.values() if canonical(p) == best)
@@ -385,11 +400,31 @@ def print_roster(root, session, me=None):
               f"{' [' + ','.join(flags) + ']' if flags else ''}")
 
 
-def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, mode="agent", order_mode=None):
+def archive_old_files(root, now):
+    """Move the previous session's md files away so a new agent never inherits stale findings."""
+    rd = review_dir(root)
+    old = sorted(rd.glob("*.md"))
+    if not old:
+        return []
+    dest = state_dir(root) / "archive" / datetime.fromtimestamp(now).strftime("%Y%m%d-%H%M%S")
+    dest.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for f in old:
+        target = dest / f.name
+        os.replace(f, target)
+        moved.append(target)
+    return moved
+
+
+def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, mode="agent", order_mode=None,
+            resume=False):
     if not NAME_RE.match(agent):
         sys.exit("ERROR: --agent must be lowercase [a-z0-9-], 1-24 chars (e.g. claude, codex, gemini-2)")
     if file and not FILE_RE.match(file):
         sys.exit("ERROR: --file must be a plain name ending in .md (e.g. c.md)")
+    if file and file.lower() in RESERVED_FILES:
+        sys.exit(f"ERROR: --file {file} is reserved: AI tools load it as instructions "
+                 "(e.g. claude.md == CLAUDE.md on Windows/macOS). Pick another name, e.g. claude-opus.md")
     now = time.time()
     with Lock(root):
         session = load_session(root)
@@ -407,6 +442,9 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
                        "ring_version": 0, "ring_log": [], "negotiation": None}
             for old in state_dir(root).glob("agent_*.json"):
                 old.unlink()
+            archived = archive_old_files(root, now)
+            if archived:
+                print(f"ARCHIVED {len(archived)} file(s) from the previous session -> {archived[0].parent}")
             registry_add(root)
             print(f"CREATED new session (order_mode={order_mode})")
         else:
@@ -419,9 +457,12 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
                 info["left"] = False
                 print(f"REJOINED as {agent} (kept file {info['file']}, prefix {info['prefix']})")
                 rebuild_ring_on_join(session, agent)
+            elif resume:
+                print(f"RESUMED as {agent} (kept file {info['file']}, prefix {info['prefix']})")
             else:
-                print(f"WARNING: '{agent}' is already active. If you are a different agent, "
-                      "leave and join with another name (e.g. claude-2).")
+                sys.exit(f"ERROR: '{agent}' is already active. A different agent must pick another name "
+                         f"(e.g. {agent}-2). If you ARE {agent} and lost your context, run join again "
+                         "with --resume.")
         else:
             used_files = {a["file"].lower() for a in agents.values()}
             used_prefixes = {a["prefix"] for a in agents.values()}
@@ -453,7 +494,7 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
 
 def cmd_join(args):
     do_join(args.root, args.agent, args.interval, args.duration, args.file, args.prefix,
-            order_mode=args.order_mode)
+            order_mode=args.order_mode, resume=args.resume)
 
 
 def snapshot(root, session, agent):
@@ -496,6 +537,8 @@ def wait_for_tick(root, agent, max_wait=None):
         sys.exit("ERROR: no session. Run join first.")
     if agent not in session.get("agents", {}):
         sys.exit(f"ERROR: '{agent}' has not joined. Run join --agent {agent} first.")
+    if session["agents"][agent].get("left"):
+        sys.exit(f"ERROR: '{agent}' left the session. Run join --agent {agent} to come back.")
     began = time.time()
     while True:
         session = load_session(root)
@@ -505,9 +548,12 @@ def wait_for_tick(root, agent, max_wait=None):
         elapsed = now - session["start"]
         next_tick = session["start"] + (int(elapsed // session["interval"]) + 1) * session["interval"]
         target = min(next_tick, session["end"])
-        if max_wait is not None and target - began > max_wait:
-            time.sleep(max(0, began + max_wait - now))
-            return "CONTINUE_WAIT", "CONTINUE_WAIT (max-wait reached, run wait again)"
+        if max_wait is not None and target > began + max_wait:
+            if now >= began + max_wait:
+                return "CONTINUE_WAIT", "CONTINUE_WAIT (max-wait reached, run wait again)"
+            # Same short slices as below, so `stop` is noticed during a long max-wait too.
+            time.sleep(min(10, began + max_wait - now))
+            continue
         # Sleep in short slices so `stop` is noticed quickly.
         if target - now > 0:
             time.sleep(min(10, target - now))
@@ -593,12 +639,16 @@ def cmd_status(args):
 def cmd_leave(args):
     with Lock(args.root):
         session = load_session(args.root)
-        if not session or args.agent not in session.get("agents", {}):
+        if not is_active(session) or args.agent not in active_agents(session):
             print("NOT_IN_SESSION")
             return
         session["agents"][args.agent]["left"] = True
         # Close the gap without reshuffling: the leaver's reviewer now reviews the leaver's target.
         set_ring(session, ring_members(session), f"{args.agent} left")
+        if session.get("negotiation") and len(active_agents(session)) < 3:
+            session["negotiation"] = None  # 2 agents have a single possible ring
+        elif session.get("negotiation") and not valid_proposals(session):
+            print("NOTE: every vote listed the leaver and is now void; agents must propose again")
         save_json(session_path(args.root), session)
     print(f"LEFT {args.agent}")
     print_ring(session)
@@ -621,7 +671,8 @@ def cmd_stop(args):
 def project_tree(root, limit=400):
     root = Path(root).resolve()
     try:
-        out = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True,
+        # Tracked + untracked-but-not-ignored, so new files are visible before their first commit.
+        out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=root, capture_output=True, text=True,
                              encoding="utf-8", errors="replace", timeout=20)
         files = [f for f in out.stdout.splitlines() if not f.startswith(DIR_NAME + "/")]
         if out.returncode == 0 and files:
@@ -644,22 +695,53 @@ def head(path, lines=80, max_chars=6000):
     return "\n".join(text.splitlines()[:lines])[:max_chars]
 
 
-def referenced_snippets(root, texts, radius=8, limit=40):
+# `path.ext:line`, or an extensionless well-known file (Dockerfile:12). Bare words like `14:51` never match.
+REF_RE = re.compile(r"((?:[A-Za-z0-9_./\\-]*[/\\])?(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|"
+                    r"Dockerfile|Makefile|LICENSE|Procfile|Gemfile|Jenkinsfile|Vagrantfile|Rakefile)):(\d+)")
+
+
+def resolve_ref(root, path, files):
+    """Map a cited path to a project file: exact (relative to root), else a unique suffix match."""
+    target = (root / path).resolve()
+    try:
+        parts = target.relative_to(root).parts
+    except ValueError:
+        return None, "OUTSIDE PROJECT ROOT"
+    if parts and parts[0] == DIR_NAME:
+        return None, "REVIEW FILE, not project code"
+    if target.is_file():
+        return target, None
+    norm = path.replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    matches = [f for f in files if f == norm or f.endswith("/" + norm)]
+    if len(matches) == 1:
+        return (root / matches[0]).resolve(), None
+    if matches:
+        return None, f"AMBIGUOUS ({len(matches)} files match: {', '.join(matches[:5])})"
+    return None, "NOT FOUND from project root (check the path)"
+
+
+def referenced_snippets(root, texts, files=None, radius=8, limit=40):
     """Pull code around every `path:line` reference so a text-only model can verify claims."""
     root = Path(root).resolve()
+    if files is None:
+        files, _ = project_tree(root, limit=100000)
     refs, seen = [], set()
     for text in texts:
-        for path, line in re.findall(r"([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+):(\d+)", text):
+        for path, line in REF_RE.findall(text):
             key = (path, int(line))
             if key not in seen:
                 seen.add(key)
                 refs.append(key)
     out = []
     for path, line in refs[:limit]:
-        target = (root / path).resolve()
-        if root not in target.parents or DIR_NAME in target.parts or not target.is_file():
-            out.append(f"--- {path}:{line} -> FILE NOT FOUND (possible invented reference)")
+        target, problem = resolve_ref(root, path, files)
+        if problem:
+            out.append(f"--- {path}:{line} -> {problem}")
             continue
+        if target != (root / path).resolve():
+            path = f"{path} (= {rel(root, target)})"
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         if line > len(lines):
             out.append(f"--- {path}:{line} -> LINE OUT OF RANGE (file has {len(lines)} lines)")
@@ -668,6 +750,22 @@ def referenced_snippets(root, texts, radius=8, limit=40):
         body = "\n".join(f"{n:>5}| {lines[n - 1]}" for n in range(lo, hi + 1))
         out.append(f"--- {path}:{line}\n{body}")
     return "\n\n".join(out)
+
+
+OTHER_FILE_CAP = 30000
+
+
+def squeeze(text, limit):
+    """Fit text in limit chars, keeping the head and the (more recent) tail."""
+    if len(text) <= limit:
+        return text
+    if limit < 200:
+        return f"(omitted, {len(text)} chars, prompt too long)"
+    marker = "\n\n...[{} chars omitted to fit the prompt]...\n\n"
+    room = limit - len(marker.format(len(text)))
+    head = room * 2 // 5
+    tail = room - head
+    return text[:head] + marker.format(len(text) - head - tail) + text[-tail:]
 
 
 def build_prompt(root, session, agent, info, round_label, tick_line, max_chars):
@@ -683,44 +781,61 @@ def build_prompt(root, session, agent, info, round_label, tick_line, max_chars):
     other_texts = {}
     for name, a in others.items():
         f = rd / a["file"]
-        other_texts[name] = f.read_text(encoding="utf-8", errors="replace")[:30000] if f.exists() else ""
-    files, total = project_tree(root)
+        text = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        # Keep the tail: answers, reviews and the round log are appended at the end.
+        other_texts[name] = squeeze(text, OTHER_FILE_CAP)
+    all_files, total = project_tree(root, limit=100000)
+    files = all_files[:400]
     key = []
     for kf in KEY_FILES:
         p = Path(root).resolve() / kf
         if p.is_file():
             key.append(f"--- {kf}\n{head(p)}")
-    snippets = referenced_snippets(root, list(other_texts.values()) + [own_text])
+    snippets = referenced_snippets(root, list(other_texts.values()) + [own_text], all_files)
 
-    parts = [
-        "You are one agent in a multi-agent mutual code review. Follow the protocol strictly.",
-        f"YOUR NAME: {agent}\nYOUR PREFIX: {info['prefix']}\nYOUR FILE: {DIR_NAME}/{info['file']}\n"
-        f"ROUND: {round_label}\nCLOCK: {tick_line}\nNOW: {stamp(time.time())}\n"
-        f"RING: {ring_text(session)} (you review the next file, answer the previous one; "
-        "you do not take part in order negotiation)",
-        "PROTOCOL:\n" + (protocol or "(PROTOCOL.md missing)"),
-        "LIMITATION: you cannot run commands or open files. Use only the code shown below as evidence. "
-        "If a claim cannot be verified from what is shown, mark it KISMEN with 'dogrulanamadi'.",
-        f"PROJECT FILES ({total} total, first {len(files)}):\n" + "\n".join(files),
-        "KEY FILES:\n" + ("\n\n".join(key) or "(none)"),
+    final = round_label == "FINAL"
+    # (text, shrink rank): rank None is never cut (identity, own file, task); otherwise the
+    # lowest rank is shrunk first. The own file is never cut: the model rewrites it whole.
+    sections = [
+        ("You are one agent in a multi-agent mutual code review. Follow the protocol strictly.", None),
+        (f"YOUR NAME: {agent}\nYOUR PREFIX: {info['prefix']}\nYOUR FILE: {DIR_NAME}/{info['file']}\n"
+         f"ROUND: {round_label}\nCLOCK: {tick_line}\nNOW: {stamp(time.time())}\n"
+         f"RING: {ring_text(session)} (you review the next file, answer the previous one; "
+         "you do not take part in order negotiation)", None),
+        ("PROTOCOL:\n" + (protocol or "(PROTOCOL.md missing)"), 3),
+        ("LIMITATION: you cannot run commands or open files. Use only the code shown below as evidence. "
+         "If a claim cannot be verified from what is shown, mark it KISMEN with 'dogrulanamadi'.", None),
+        (f"PROJECT FILES ({total} total, first {len(files)}):\n" + "\n".join(files), 0),
+        ("KEY FILES:\n" + ("\n\n".join(key) or "(none)"), 1),
     ]
     for name, text in other_texts.items():
-        parts.append(f"{' + '.join(roles[name])} - AGENT '{name}' FILE {DIR_NAME}/{others[name]['file']}:\n{text}")
-    parts.append("CODE AT REFERENCED path:line LOCATIONS:\n" + (snippets or "(none)"))
-    parts.append(f"YOUR CURRENT FILE:\n{own_text}")
-    final = round_label == "FINAL"
-    parts.append(
+        sections.append((f"{' + '.join(roles[name])} - AGENT '{name}' FILE "
+                         f"{DIR_NAME}/{others[name]['file']}:\n{text}", 4))
+    sections.append(("CODE AT REFERENCED path:line LOCATIONS:\n" + (snippets or "(none)"), 2))
+    sections.append((f"YOUR CURRENT FILE:\n{own_text}", None))
+    sections.append((
         "TASK: " + ("This is the FINAL round: answer pending objections and append the '## Son Durum' block. "
                     if final else "Do this round as the protocol says. ")
         + "Output the COMPLETE new content of YOUR FILE (not a diff), "
-        f"between a line '{BEGIN_MARK}' and a line '{END_MARK}'. Nothing else matters outside the markers."
-    )
-    prompt = "\n\n".join(parts)
-    if len(prompt) > max_chars:
-        # Drop the project file list first; it is the least valuable context.
-        trimmed = f"PROJECT FILES ({total} total): (omitted, prompt too long)"
-        prompt = prompt.replace(parts[4], trimmed)
-    return prompt[-max_chars:] if len(prompt) > max_chars else prompt
+        f"between a line '{BEGIN_MARK}' and a line '{END_MARK}'. Nothing else matters outside the markers.",
+        None))
+    return fit_sections(sections, max_chars)
+
+
+def fit_sections(sections, max_chars, sep="\n\n"):
+    """Join sections within max_chars by shrinking the least valuable ones first; never cut fixed ones."""
+    texts = [t for t, _ in sections]
+    total = lambda: sum(map(len, texts)) + len(sep) * (len(texts) - 1)
+    ranked = sorted((rank, i) for i, (_, rank) in enumerate(sections) if rank is not None)
+    for _, i in ranked:
+        excess = total() - max_chars
+        if excess <= 0:
+            break
+        texts[i] = squeeze(texts[i], max(0, len(texts[i]) - excess))
+    if total() > max_chars:
+        print(f"[drive] WARNING: prompt is {total()} chars > --max-chars {max_chars}; "
+              "identity, own file and task are never cut", file=sys.stderr, flush=True)
+    return sep.join(texts)
 
 
 def extract_file(output):
@@ -729,7 +844,9 @@ def extract_file(output):
     else:
         body = output
     body = body.strip()
-    fence = re.fullmatch(r"```[a-zA-Z]*\n(.*)\n```", body, re.S)
+    # Outermost fence: first opening line to the LAST closing line, so inner code blocks survive
+    # and chatter before/after the block is dropped.
+    fence = re.search(r"^```[\w-]*[ \t]*\n(.*)\n```[ \t]*$", body, re.S | re.M)
     if fence:
         body = fence.group(1).strip()
     return body if "## Eksiklikler" in body else None
@@ -765,7 +882,7 @@ def run_model(root, args, agent, info, round_label, tick_line):
 def cmd_drive(args):
     root = args.root
     _, info = do_join(root, args.agent, args.interval, args.duration, args.file, args.prefix, mode="drive",
-                      order_mode=args.order_mode)
+                      order_mode=args.order_mode, resume=args.resume)
     run_model(root, args, args.agent, info, "0", "round 0 (initial findings)")
     while True:
         kind, line = wait_for_tick(root, args.agent)
@@ -794,6 +911,8 @@ def main():
         sp.add_argument("--order-mode", choices=ORDER_MODES, help="only used when creating a session")
         sp.add_argument("--file", help="own md file name (default: <prefix>.md, e.g. c.md, co.md)")
         sp.add_argument("--prefix", help="finding id prefix (default: auto from name)")
+        sp.add_argument("--resume", action="store_true",
+                        help="you are this already-active agent and lost your context (e.g. after /clear)")
 
     joiner(sub.add_parser("join"))
     w = sub.add_parser("wait")
