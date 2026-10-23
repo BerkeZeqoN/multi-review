@@ -66,6 +66,11 @@ Add `multi-review/` to `.gitignore` in git repos.
 - `CONTINUE_WAIT` → only with `--max-wait`; run `wait` again
 - `SESSION_OVER final_writer=NAME final_file=multi-review/final.md` → final round, then stop
 
+The roster shows `seen=<age>_ago` per agent (every `wait` is a heartbeat).
+No `wait` for 3 intervals (min 5 min) marks it `[STALE]` and prints
+`STALE_AGENTS=...`: its loop has most likely stopped. Tell the user so they
+can restart that agent; `finalize` names stale agents in `WAITING_FOR`.
+
 It also prints `RING vN`, `YOUR_ROLE: review=... answer=...`, and in negotiated
 mode `order_status=SETTLED | NEGOTIATING proposals=... waiting_for=... deadline_tick=N`.
 

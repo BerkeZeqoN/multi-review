@@ -356,6 +356,29 @@ class WorkModes(TempProject):
         self.assertEqual(m.load_session(str(self.root))["areas"], ["docs/", "src/", "(root files)"])
 
 
+class Liveness(TempProject):
+    def test_agent_without_wait_becomes_stale(self):
+        # An agent whose loop died must show up, not silently block finalize.
+        import time
+        self.create()
+        self.join("codex")
+        s = m.load_session(str(self.root))
+        now = time.time()
+        m.touch_seen(str(self.root), "claude")
+        self.assertFalse(m.is_stale(str(self.root), s, "claude", now))
+        self.assertFalse(m.is_stale(str(self.root), s, "codex", now))  # just joined
+        later = now + 3 * s["interval"] + 1
+        self.assertTrue(m.is_stale(str(self.root), s, "codex", later))
+        _, out = quiet(m.print_roster, str(self.root), s, "claude")
+        self.assertIn("seen=", out)
+
+    def test_wait_refreshes_heartbeat(self):
+        self.create()
+        m.wait_for_tick(str(self.root), "claude", max_wait=1)
+        seen = m.load_json(m.state_dir(str(self.root)) / "agent_claude.seen.json")
+        self.assertIsNotNone(seen)
+
+
 class Final(TempProject):
     def args(self, agent, **kw):
         base = {"root": str(self.root), "agent": agent, "wait": "1s", "archive": False, "force": False}

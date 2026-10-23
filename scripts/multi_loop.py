@@ -493,18 +493,48 @@ def work_check(root, session, agent):
     return line
 
 
+def touch_seen(root, agent):
+    """Heartbeat: every `wait` (start and tick) refreshes it, so a dead agent loop becomes visible."""
+    save_json(state_dir(root) / f"agent_{agent}.seen.json", {"seen": time.time()})
+
+
+def last_seen(root, session, agent):
+    seen = load_json(state_dir(root) / f"agent_{agent}.seen.json", {}) or {}
+    snap = state_dir(root) / f"agent_{agent}.json"  # written on every tick, also by older versions
+    snap_time = snap.stat().st_mtime if snap.exists() else 0
+    return max(seen.get("seen", 0), snap_time, session["agents"][agent]["joined"])
+
+
+def is_stale(root, session, agent, now=None):
+    """No `wait` for 3 intervals (at least 5 min): its loop has most likely stopped."""
+    now = now or time.time()
+    return now - last_seen(root, session, agent) > max(3 * session["interval"], 300)
+
+
+def stale_agents(root, session):
+    return [n for n, a in active_agents(session).items() if a.get("mode") != "drive" and is_stale(root, session, n)]
+
+
 def print_roster(root, session, me=None):
     print_ring(session, me)
     print("ROSTER:")
+    now = time.time()
     for name, a in session.get("agents", {}).items():
         flags = []
         if a.get("left"):
             flags.append("LEFT")
+        elif is_active(session) and is_stale(root, session, name, now):
+            flags.append("STALE")
         if name == me:
             flags.append("YOU")
         print(f"  - {name:<14} prefix={a['prefix']:<4} file={DIR_NAME}/{a['file']:<20} "
-              f"mode={a.get('mode', 'agent'):<6} joined={stamp(a['joined'])}"
+              f"mode={a.get('mode', 'agent'):<6} joined={stamp(a['joined'])} "
+              f"seen={fmt(now - last_seen(root, session, name))}_ago"
               f"{' [' + ','.join(flags) + ']' if flags else ''}")
+    stale = [n for n in stale_agents(root, session) if n != me] if is_active(session) else []
+    if stale:
+        print(f"STALE_AGENTS={','.join(stale)} (no wait for 3+ intervals: their loop probably stopped; "
+              "tell the user so they can restart it, or `leave` them)")
 
 
 def archive_old_files(root, now):
@@ -653,6 +683,7 @@ def wait_for_tick(root, agent, max_wait=None):
     if session["agents"][agent].get("left"):
         sys.exit(f"ERROR: '{agent}' left the session. Run join --agent {agent} to come back.")
     began = time.time()
+    touch_seen(root, agent)
     while True:
         session = load_session(root)
         now = time.time()
@@ -676,6 +707,7 @@ def wait_for_tick(root, agent, max_wait=None):
             return "SESSION_OVER", over_line(load_session(root))
         settle_if_due(root)
         session = load_session(root)
+        touch_seen(root, agent)
         roles, ring_changed, prev_roles = snapshot(root, session, agent)
         line = (f"TICK {current_tick(session)} review={roles['review'][0]} review_changed={roles['review'][1]} "
                 f"answer={roles['answer'][0]} answer_changed={roles['answer'][1]} "
@@ -863,7 +895,10 @@ def cmd_finalize(args):
         if not pending:
             break
         if time.time() >= deadline:
-            sys.exit(f"WAITING_FOR: {','.join(pending)} did not run `done`; run finalize again, "
+            stale = [n for n in pending if is_stale(root, load_session(root), n)]
+            sys.exit(f"WAITING_FOR: {','.join(pending)} did not run `done`"
+                     f"{' (stale, loop probably stopped: ' + ','.join(stale) + ')' if stale else ''}; "
+                     "run finalize again, "
                      "or pass --force to finalize without them")
         time.sleep(5)
     with Lock(root):
