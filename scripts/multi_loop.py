@@ -223,15 +223,24 @@ class Lock:
                         continue
                 except FileNotFoundError:
                     continue
-                if time.time() > deadline:
-                    sys.exit(f"ERROR: lock busy: {self.path}")
-                time.sleep(0.2)
+                except PermissionError:
+                    pass  # Windows: the lock is being deleted ("delete pending"); retry below
+            except PermissionError:
+                pass  # Windows: create refused while the previous lock is still being deleted
+            if time.time() > deadline:
+                sys.exit(f"ERROR: lock busy: {self.path}")
+            time.sleep(0.2)
 
     def __exit__(self, *exc):
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+        # Retry briefly: on Windows an antivirus or indexer can hold the file for a moment.
+        for _ in range(10):
+            try:
+                self.path.unlink()
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                time.sleep(0.1)
 
 
 def pick_prefix(name, used):

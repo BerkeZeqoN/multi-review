@@ -58,11 +58,21 @@ def install(tool, dest, dry):
         # Back up outside every skills folder: a second SKILL.md there would load as a duplicate skill.
         backup = HOME / f".{NAME}" / "backups" / f"{tool}-{datetime.now():%Y%m%d-%H%M%S}"
         shutil.copytree(dest, backup, ignore=shutil.ignore_patterns("__pycache__"))
-        shutil.rmtree(dest)
+    # Overwrite in place, then drop leftovers: an rmtree that fails halfway (Windows: a terminal sitting
+    # in the folder, an open editor) would leave a half-deleted skill.
     for rel in FILES:
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO / rel, target)
+    keep = {(dest / rel).resolve() for rel in FILES}
+    for path in sorted(dest.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        try:
+            if path.is_file() and path.resolve() not in keep:
+                path.unlink()
+            elif path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+        except OSError as e:
+            print(f"{'':<12} warning: could not remove leftover {path} ({e})")
 
 
 def uninstall(tool, dest, dry):
