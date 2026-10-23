@@ -10,13 +10,18 @@ joining.** This file covers starting, joining and tool-specific waiting.
 
 ```
 <project>/multi-review/
-  c.md  a.md  co.md  g.md ...      one file per agent (claude, antigravity, codex, gemini)
-  .state/session.json              clock + roster + review ring
+  claude-opus.md  codex-gpt.md ...   one file per agent; each agent picks its own name (--file)
+  final.md                           shared result: the only md file left after `finalize`
+  .state/session.json                clock + roster + review ring + work mode
 ```
 
-Agents form a ring `c.md > a.md > co.md > c.md`: each reviews the next file
-and answers the previous one. When an agent joins, the script assigns its file
-and rebuilds the ring, so the newcomer is wired in automatically.
+Agents form a ring `claude-opus.md > codex-gpt.md > ... > claude-opus.md`:
+each reviews the next file and answers the previous one. When an agent joins,
+the ring is rebuilt, so the newcomer is wired in automatically. Without
+`--file` an agent gets a short default (`c.md`, `a.md`, `co.md`, `g.md`).
+**Never** name a review file after an instruction file (`claude.md`,
+`agents.md`, `gemini.md`, `final.md`, ...): `join` rejects those, because
+tools auto-load them as instructions.
 
 ## Inputs
 
