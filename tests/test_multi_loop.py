@@ -294,6 +294,19 @@ class WorkModes(TempProject):
         self.assertIn("own_findings=2 new=1", line)
         self.assertNotIn("WORK_WARNING", line)
 
+    def test_logged_clean_scan_clears_idle(self):
+        # A clean area is valid research when the log says what was checked (PROTOCOL "Every TICK" 4).
+        self.create()
+        s = m.load_session(str(self.root))
+        own = self.root / m.DIR_NAME / "c.md"
+        m.work_check(str(self.root), s, "claude")
+        m.work_check(str(self.root), s, "claude")
+        self.assertIn("WORK_WARNING", m.work_check(str(self.root), s, "claude"))
+        own.write_text(own.read_text() + "- Tur 3 (10:00): Taze tarama: src/auth/*, grep -n token -> temiz\n")
+        line = m.work_check(str(self.root), s, "claude")
+        self.assertIn("clean_scans=1", line)
+        self.assertNotIn("WORK_WARNING", line)
+
     def test_review_mode_only_lead_must_research(self):
         self.create(work_mode="review")
         self.join("codex")

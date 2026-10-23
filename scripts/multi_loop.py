@@ -450,23 +450,29 @@ def must_research(session, agent):
     return session.get("work_mode", "research") != "review" or agent == work_lead(session)
 
 
+# A logged clean pass ("Taze tarama: src/auth/*, grep -n token -> temiz") counts as research too.
+SCAN_RE = re.compile(r"^\s*-?\s*.{0,40}?Taze tarama\s*:", re.M | re.I)
+
+
 def count_findings(root, info):
+    """(own finding headings, logged clean passes) in the agent's file."""
     f = review_dir(root) / info["file"]
     if not f.exists():
-        return 0
+        return 0, 0
     text = f.read_text(encoding="utf-8", errors="replace")
-    return len(re.findall(rf"^### {re.escape(info['prefix'])}-\d+", text, re.M))
+    return len(re.findall(rf"^### {re.escape(info['prefix'])}-\d+", text, re.M)), len(SCAN_RE.findall(text))
 
 
 def work_check(root, session, agent):
     """Count the agent's own findings; flag agents that only comment when they are supposed to research."""
     path = state_dir(root) / f"agent_{agent}.work.json"
-    state = load_json(path, {"count": None, "idle": 0})
-    count = count_findings(root, session["agents"][agent])
+    state = load_json(path, {"count": None, "scans": 0, "idle": 0})
+    count, scans = count_findings(root, session["agents"][agent])
     new = 0 if state["count"] is None else max(0, count - state["count"])
-    idle = 0 if new or state["count"] is None else state["idle"] + 1
-    save_json(path, {"count": count, "idle": idle})
-    line = f" own_findings={count} new={new}"
+    new_scans = 0 if state["count"] is None else max(0, scans - state.get("scans", 0))
+    idle = 0 if new or new_scans or state["count"] is None else state["idle"] + 1
+    save_json(path, {"count": count, "scans": scans, "idle": idle})
+    line = f" own_findings={count} new={new}" + (f" clean_scans={new_scans}" if new_scans else "")
     if must_research(session, agent) and idle >= IDLE_TICKS_WARN:
         line += (f" WORK_WARNING=no_new_findings_for_{idle}_ticks(research the code yourself; "
                  "if your area is clean, log what you checked with evidence)")
