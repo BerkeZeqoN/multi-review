@@ -42,15 +42,18 @@ and command output in English.
 ```bash
 python SCRIPT join --agent NAME --interval 5m --duration 2h --order-mode random|negotiated  # creator
 python SCRIPT join --agent NAME                      # later agents: join
-python SCRIPT wait --agent NAME [--max-wait 9m]      # block until next tick
+python SCRIPT wait --agent NAME                      # block until next tick
+python SCRIPT wait --agent NAME --max-wait 9m        # same, for tools with command timeouts
 python SCRIPT propose --agent NAME --order a,b,c     # negotiated mode: vote ring order
 python SCRIPT shuffle                                # random mode: reshuffle now (user asks)
-python SCRIPT roster | status                        # ring, roles, clock
+python SCRIPT roster                                 # ring, roles
+python SCRIPT status                                 # ring, roles, clock
 python SCRIPT leave --agent NAME                     # you quit early
 python SCRIPT stop                                   # user ends it for all
 python SCRIPT join --agent NAME --resume             # you ARE this agent and lost context (/clear)
 python SCRIPT done --agent NAME                      # after SESSION_OVER: your final round is finished
-python SCRIPT finalize --agent NAME [--archive]      # final writer only: keep final.md, remove the rest
+python SCRIPT finalize --agent NAME                  # final writer only: keep final.md, delete the rest
+python SCRIPT finalize --agent NAME --archive        # same, but move the rest to .state/archive/
 ```
 
 Durations: `30s`, `5m`, `10dk`, `2h`, `2sa`, `1h30m`; bare number = minutes.

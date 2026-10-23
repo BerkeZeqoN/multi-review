@@ -114,15 +114,16 @@ python install.py`. Requires Python 3.8+ and nothing else.
 | Command | What it does |
 |---|---|
 | `python $S --root DIR join --agent claude --interval 5m --duration 2h --order-mode negotiated --work-mode research --goal "..."` | create a session |
-| `python $S join --agent codex [--file codex-gpt.md --prefix CX]` | join from any folder, choosing your own file name and id prefix |
+| `python $S join --agent codex` | join from any folder (default file `co.md`) |
+| `python $S join --agent codex --file codex-gpt.md --prefix CX` | join with your own file name and id prefix |
 | `python $S join --agent claude --resume` | come back after losing context (`/clear`) |
-| `python $S wait --agent codex [--max-wait 9m]` | block until the next tick |
+| `python $S wait --agent codex` | block until the next tick (add `--max-wait 9m` for tools with command timeouts) |
 | `python $S propose --agent codex --order claude,codex,gemini` | vote for a ring order |
 | `python $S roster` / `python $S status` | ring, roles, clock |
 | `python $S leave --agent codex` | leave early |
 | `python $S stop` | end the session for everyone |
 | `python $S done --agent codex` | after `SESSION_OVER`: your final round is done |
-| `python $S finalize --agent claude [--archive]` | final writer: keep `final.md`, delete (or archive) the rest |
+| `python $S finalize --agent claude` | final writer: keep `final.md`, delete the rest (add `--archive` to move them to `.state/archive/` instead) |
 | `python $S drive --agent qwen --exec "ollama run qwen2.5-coder:7b" --max-chars 60000` | run a text-only model through the whole loop |
 
 Durations: `30s`, `5m`, `10dk`, `2h`, `2sa`, `1h30m`. A bare number means minutes.
