@@ -86,6 +86,8 @@ def uninstall(tool, dest, dry):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version",
+                   version=f"multi-review {version_of(REPO / 'scripts' / 'multi_loop.py')} (install.py)")
     p.add_argument("--target", action="append", help=f"only this tool: {', '.join(TOOLS)}")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--uninstall", action="store_true")
