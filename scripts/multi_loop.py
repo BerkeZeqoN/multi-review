@@ -458,10 +458,11 @@ LOG_HEADING = "## Tur gunlugu"
 
 def round_log(text):
     """The `## Tur gunlugu` section of an agent file (up to the next `## ` heading)."""
-    start = text.find(LOG_HEADING)
-    if start < 0:
+    # The real heading is a whole line; the same words quoted inside a sentence must not match.
+    heads = list(re.finditer(rf"^{re.escape(LOG_HEADING)}[ \t]*$", text, re.M))
+    if not heads:
         return ""
-    body = text[start + len(LOG_HEADING):]
+    body = text[heads[-1].end():]
     nxt = re.search(r"^## ", body, re.M)
     return body[:nxt.start()] if nxt else body
 

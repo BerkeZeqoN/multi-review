@@ -307,6 +307,12 @@ class WorkModes(TempProject):
         self.assertIn("clean_scans=1", line)
         self.assertNotIn("WORK_WARNING", line)
 
+    def test_round_log_ignores_quoted_heading(self):
+        # The heading quoted in a sentence before the real section must not hide the real log.
+        text = ("## Eksiklikler\n- only lines under `## Tur gunlugu` count\n\n## Tur gunlugu\n"
+                "- Tur 1 (10:00): Taze tarama: src -> temiz\n")
+        self.assertEqual(len(m.SCAN_RE.findall(m.round_log(text))), 1)
+
     def test_quoted_scan_outside_round_log_does_not_count(self):
         # CO-003: quoting the protocol example in a review is not research.
         self.create()
