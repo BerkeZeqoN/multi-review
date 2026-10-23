@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `STALE_AGENTS` also lists drive agents whose driver stopped.
+- `status` and `roster` print a `NEXT:` line with the selected `--root`/`--session`.
+
 ## [0.4.0] - 2026-10-23
 
 ### Added
