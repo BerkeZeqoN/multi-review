@@ -1,0 +1,32 @@
+name: Bug report
+description: Something in the script or the protocol does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Command you ran and its full output (the `TICK`/`ERROR` line matters).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `python scripts/multi_loop.py --version`
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, Python version, agents in the session
+      placeholder: Windows 11, Python 3.12, claude + codex + antigravity
+    validations:
+      required: true

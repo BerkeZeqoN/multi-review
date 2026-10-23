@@ -1,0 +1,16 @@
+name: Feature request
+description: A new option, mode or supported tool
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What goes wrong or is missing in a real session?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Flag / protocol rule / tool you would add.
