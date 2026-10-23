@@ -1,0 +1,8 @@
+# Lint only (no formatter churn): pyflakes, pycodestyle errors, bugbear, pyupgrade-safe for 3.8.
+target-version = "py38"
+line-length = 120
+extend-exclude = ["multi-review"]
+
+[lint]
+select = ["E", "F", "W", "B", "I"]
+ignore = ["E731"]  # small lambdas are used on purpose (ring_text helpers, tests)

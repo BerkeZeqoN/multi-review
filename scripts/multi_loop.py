@@ -780,8 +780,8 @@ def project_tree(root, limit=400):
     root = Path(root).resolve()
     try:
         # Tracked + untracked-but-not-ignored, so new files are visible before their first commit.
-        out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=root, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", timeout=20)
+        out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=root,
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         files = [f for f in out.stdout.splitlines() if not f.startswith(DIR_NAME + "/")]
         if out.returncode == 0 and files:
             return files[:limit], len(files)
