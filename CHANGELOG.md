@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
 ## [0.3.0] - 2026-10-23
 
 ### Added
@@ -44,6 +46,10 @@ All notable changes to this project are documented here. The format follows
 - A left agent can no longer `wait`. `leave` closes a negotiation that can
   no longer happen.
 - Writes to the machine-wide session registry are locked.
+- `WORK_WARNING` also clears on a logged clean pass (`Taze tarama: ...`), as
+  the protocol allows.
+- Windows: the lock retries on `PermissionError`, and `install.py` updates in
+  place instead of `rmtree`.
 
 ## [0.1.0] - 2026-10-23
 
@@ -51,5 +57,6 @@ All notable changes to this project are documented here. The format follows
 - First public version: N-agent review ring, shared clock, random or
   negotiated ring order, `drive` for text-only models.
 
+[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/BerkeZeqoN/multi-review/releases/tag/v0.1.0
