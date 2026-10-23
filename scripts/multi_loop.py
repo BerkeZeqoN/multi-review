@@ -586,7 +586,8 @@ def is_stale(root, session, agent, now=None):
 
 
 def stale_agents(root, session):
-    return [n for n, a in active_agents(session).items() if a.get("mode") != "drive" and is_stale(root, session, n)]
+    # Drive agents wait through their driver, so a dead driver is just as stale (CO-005).
+    return [n for n in active_agents(session) if is_stale(root, session, n)]
 
 
 def print_roster(root, session, me=None):
@@ -877,6 +878,7 @@ def cmd_roster(args):
         print("NO_SESSION")
         return
     print_roster(args.root, session)
+    print(next_cmd(args.root, "join --agent <you>   (already in: wait --agent <you>)"))
 
 
 def cmd_status(args):
@@ -886,6 +888,7 @@ def cmd_status(args):
         return
     print_clock(session)
     print_roster(args.root, session)
+    print(next_cmd(args.root, "join --agent <you>   (already in: wait --agent <you>)"))
 
 
 def cmd_leave(args):

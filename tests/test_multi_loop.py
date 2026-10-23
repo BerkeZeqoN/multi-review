@@ -413,6 +413,12 @@ class MultiSession(TempProject):
         self.assertIn("SESSION=security DIR=multi-review/security", out)
         self.assertRegex(out, r"NEXT: python .* --session security wait --agent claude")
 
+    def test_status_prints_next_with_session(self):
+        # CO-006: read-only commands also hand over the selected --root/--session.
+        self.in_session("security", self.create)
+        _, out = quiet(m.cmd_status, type("A", (), {"root": str(self.root)})())
+        self.assertRegex(out, r"NEXT: python .* --session security join --agent <you>")
+
     def test_bad_session_name(self):
         for bad in ("Has Space", "../x", "state", "x" * 40):
             with self.assertRaises(SystemExit, msg=bad):
@@ -432,6 +438,11 @@ class Liveness(TempProject):
         self.assertFalse(m.is_stale(str(self.root), s, "codex", now))  # just joined
         later = now + 3 * s["interval"] + 1
         self.assertTrue(m.is_stale(str(self.root), s, "codex", later))
+        # CO-005: a drive agent whose driver died is listed too.
+        s["agents"]["codex"]["mode"] = "drive"
+        import unittest.mock as mock
+        with mock.patch.object(m.time, "time", return_value=later):
+            self.assertIn("codex", m.stale_agents(str(self.root), s))
         _, out = quiet(m.print_roster, str(self.root), s, "claude")
         self.assertIn("seen=", out)
 
