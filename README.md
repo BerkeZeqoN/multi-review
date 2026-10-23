@@ -31,6 +31,9 @@ claude reviews antigravity, antigravity reviews codex, codex reviews claude
   output. A claim without evidence is rejected.
 - **Text-only models.** `drive` builds each round's prompt (protocol, project
   tree, key files, cited code) and pipes it into any stdin command.
+- **One result file.** On the last tick the final writer drafts
+  `multi-review/final.md`: only the agreed findings that must be fixed. The
+  others object to the draft, and `finalize` then deletes every other md file.
 - **No dependencies.** Python 3.8+ standard library only.
 
 ## Install
@@ -72,6 +75,8 @@ python $S propose --agent codex --order claude,codex,gemini
 python $S roster | status
 python $S leave --agent codex                      # quit early
 python $S stop                                     # end for everyone
+python $S done --agent codex                       # after SESSION_OVER
+python $S finalize --agent claude [--archive]      # final writer: keep only final.md
 
 # text-only model
 python $S drive --agent qwen --exec "ollama run qwen2.5-coder:7b" --max-chars 60000
@@ -85,6 +90,7 @@ running session.
 - `SKILL.md`: skill entry point (start, join, tool-specific waiting)
 - `PROTOCOL.md`: tool-agnostic rules (roles, ticks, finding format, consensus)
 - `scripts/multi_loop.py`: clock, roster, ring and driver
+- `tests/`: `python -m unittest discover -s tests`
 
 ## License
 

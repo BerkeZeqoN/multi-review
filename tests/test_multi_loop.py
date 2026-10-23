@@ -259,6 +259,83 @@ class Waiting(TempProject):
         self.assertLess(time.time() - began, 15)
 
 
+class Final(TempProject):
+    def args(self, agent, **kw):
+        base = {"root": str(self.root), "agent": agent, "wait": "1s", "archive": False, "force": False}
+        base.update(kw)
+        return type("A", (), base)()
+
+    def setup_over(self):
+        self.create()
+        self.join("codex")
+        self.join("qwen", mode="drive")
+        quiet(m.cmd_stop, type("A", (), {"root": str(self.root)})())
+        rd = self.root / m.DIR_NAME
+        (rd / "notes.md").write_text("scratch")
+        return rd
+
+    def write_final(self, rd):
+        (rd / m.FINAL_FILE).write_text(f"# final.md\n\n{m.FINAL_HEADING} (oncelik sirasiyla)\n\n### F-001 x\n")
+
+    def test_final_name_is_reserved(self):
+        with self.assertRaises(SystemExit):
+            self.create(file="Final.md")
+
+    def test_writer_is_earliest_non_drive(self):
+        self.setup_over()
+        s = m.load_session(str(self.root))
+        self.assertEqual(m.final_writer(s), "claude")
+        self.assertIn("final_writer=claude", m.over_line(s))
+
+    def test_final_phase_on_last_tick_only(self):
+        self.create()
+        s = m.load_session(str(self.root))
+        self.assertFalse(m.in_final_phase(s, now=s["start"] + 1))
+        self.assertTrue(m.in_final_phase(s, now=s["end"] - s["interval"] + 1))
+        self.assertFalse(m.in_final_phase(s, now=s["end"] + 1))
+
+    def test_finalize_requires_heading(self):
+        rd = self.setup_over()
+        (rd / m.FINAL_FILE).write_text("# final.md\nno section\n")
+        with self.assertRaises(SystemExit):
+            quiet(m.cmd_finalize, self.args("claude", force=True))
+        self.assertTrue((rd / "c.md").exists())
+
+    def test_only_writer_and_waits_for_done(self):
+        rd = self.setup_over()
+        self.write_final(rd)
+        with self.assertRaises(SystemExit):
+            quiet(m.cmd_finalize, self.args("codex"))  # not the writer
+        with self.assertRaises(SystemExit) as cm:
+            quiet(m.cmd_finalize, self.args("claude"))  # codex and qwen not done
+        self.assertIn("WAITING_FOR", str(cm.exception.code))
+        self.assertTrue((rd / "co.md").exists())
+
+    def test_finalize_deletes_everything_but_final(self):
+        rd = self.setup_over()
+        self.write_final(rd)
+        quiet(m.cmd_done, self.args("codex"))
+        m.mark_done(str(self.root), "qwen")
+        _, out = quiet(m.cmd_finalize, self.args("claude"))
+        self.assertIn("FINALIZED", out)
+        self.assertEqual(sorted(p.name for p in rd.glob("*.md")), [m.FINAL_FILE])
+        self.assertTrue(m.load_session(str(self.root)).get("finalized"))
+
+    def test_finalize_archive_keeps_copies(self):
+        rd = self.setup_over()
+        self.write_final(rd)
+        quiet(m.cmd_finalize, self.args("claude", force=True, archive=True))
+        self.assertEqual(sorted(p.name for p in rd.glob("*.md")), [m.FINAL_FILE])
+        kept = sorted(p.name for p in (rd / m.STATE_DIR / "archive").rglob("*.md"))
+        self.assertEqual(kept, ["c.md", "co.md", "notes.md", "q.md"])
+
+    def test_finalize_refused_while_running(self):
+        self.create()
+        self.write_final(self.root / m.DIR_NAME)
+        with self.assertRaises(SystemExit):
+            quiet(m.cmd_finalize, self.args("claude"))
+
+
 class Prompt(TempProject):
     def test_small_budget_keeps_identity_and_tail_of_other_file(self):
         # C-001 + A-005

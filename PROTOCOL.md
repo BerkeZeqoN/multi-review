@@ -48,16 +48,20 @@ python SCRIPT shuffle                                # random mode: reshuffle no
 python SCRIPT roster | status                        # ring, roles, clock
 python SCRIPT leave --agent NAME                     # you quit early
 python SCRIPT stop                                   # user ends it for all
+python SCRIPT join --agent NAME --resume             # you ARE this agent and lost context (/clear)
+python SCRIPT done --agent NAME                      # after SESSION_OVER: your final round is finished
+python SCRIPT finalize --agent NAME [--archive]      # final writer only: keep final.md, remove the rest
 ```
 
 Durations: `30s`, `5m`, `10dk`, `2h`, `2sa`, `1h30m`; bare number = minutes.
-Add `multi-review/.state/` to `.gitignore` in git repos.
+Add `multi-review/` to `.gitignore` in git repos.
 
 `wait` prints one of:
 - `TICK <n> review=a.md review_changed=yes answer=co.md answer_changed=no ring_changed=no`
   (+ `previous_review=... previous_answer=...` when the ring changed) → review round
+  (+ `final_phase=yes final_writer=NAME` on the last tick) → also do the final phase
 - `CONTINUE_WAIT` → only with `--max-wait`; run `wait` again
-- `SESSION_OVER` → final round, then stop
+- `SESSION_OVER final_writer=NAME final_file=multi-review/final.md` → final round, then stop
 
 It also prints `RING vN`, `YOUR_ROLE: review=... answer=...`, and in negotiated
 mode `order_status=SETTLED | NEGOTIATING proposals=... waiting_for=... deadline_tick=N`.
@@ -159,14 +163,55 @@ change gives a finding a second reviewer - more confidence, not a reset.
 ## Rules
 
 - **Write only your own file.** Never edit another agent's md or `.state/`.
+  Only exception: the `final_writer` writes `final.md` in the final phase.
 - **Do not change project code** unless the user explicitly asks.
 - Every claim needs evidence (path:line, command + output). No evidence → RED.
 - Be critical, not polite. Self-critique: retract your own wrong findings.
 - Past ~600 lines, collapse closed items into `## Kapanan maddeler` (id + 1 line).
 
+## Final phase - `final.md` (last tick, `final_phase=yes`)
+
+The session ends with ONE shared file, `multi-review/final.md`: only the findings
+that must be fixed. After `finalize` every other md file is deleted, so
+anything not carried into `final.md` is gone.
+
+- `final_writer` (the earliest-joined agent with a terminal) writes the
+  **draft** of `final.md` this tick. This is the only exception to "write only
+  your own file", and only the final writer may do it.
+- What goes in: every **ortak kabul** finding from every agent's file
+  (not only your ring neighbours), merged when two ids describe the same
+  defect, sorted by severity. TARTISMALI findings go to their own section with
+  both sides in one line. Retracted / rejected ones are not copied.
+- Everyone else reads the draft this tick and objects in their own file under
+  `## final.md itirazlari` (missing finding, wrong merge, wrong severity,
+  something listed that was never agreed). Evidence rules still apply.
+
+```markdown
+# final.md - <project> duzeltilecek bulgular (<date>)
+> Yazan: <final_writer>. Katilan: claude, codex, ... Oturum: <start> - <end>.
+
+## Duzeltilecekler (oncelik sirasiyla)
+
+### F-001 [Kritik] <kisa baslik>
+- Kaynak: C-007, A-004            (birlestirilen id'ler)
+- Yer: `path:line`
+- Sorun: <1-2 cumle>
+- Oneri: <somut duzeltme>
+- Kabul: claude, antigravity, codex
+
+## Tartismali (karar kullanicida)
+- C-005: <taraf A> / <taraf B>
+
+## Kapsam disi
+- <geri cekilen veya reddedilen id'ler, 1 satir>
+```
+
+`## Duzeltilecekler` is required: `finalize` refuses a file without it.
+
 ## SESSION_OVER - final round
 
 1. Read your `review` and `answer` files one last time; answer anything pending.
+   Read `final.md` and record any last objection under `## final.md itirazlari`.
 2. Append:
 
 ```markdown
@@ -177,4 +222,14 @@ change gives a finding a second reviewer - more confidence, not a reset.
 - Onerilen ilk 5 is: ...
 ```
 
-3. Tell the user the session ended, with a short summary and your file path.
+3. **Not the final writer:** run `done --agent NAME`. Your file will be deleted
+   by `finalize`; everything that matters must already be in `final.md` or in
+   your objections.
+4. **Final writer:** read every `## final.md itirazlari`, fix `final.md` (or
+   answer the objection inside `final.md` under `## Tartismali`), then run
+   `finalize --agent NAME`. It waits up to `--wait 10m` for everyone's `done`,
+   checks `final.md`, deletes every other md file (`--archive` moves them to
+   `.state/archive/` instead) and closes the session. If someone never runs
+   `done`, it stops with `WAITING_FOR: ...`; rerun, or ask the user before `--force`.
+5. Tell the user the session ended, with a short summary and the path of
+   `multi-review/final.md`.

@@ -66,7 +66,11 @@ active session in `~/.multi-review/active.json`. If several reviews run at
 once the script prints `MULTIPLE_SESSIONS` with their paths: ask the user which
 one, then pass `--root`. Never ask the user for the path when joining otherwise.
 
-Then follow PROTOCOL.md: Round 0 → `wait` → TICK rounds → SESSION_OVER.
+Then follow PROTOCOL.md: Round 0 → `wait` → TICK rounds → final phase
+(`final_phase=yes`: the final writer drafts `multi-review/final.md`) →
+SESSION_OVER → `done` (everyone else) → `finalize` (final writer: keeps only
+`final.md`, deletes the other md files). Lost your context mid-session
+(`/clear`)? Rejoin with `join --agent NAME --resume`.
 In negotiated mode, every agent with a terminal also argues under
 `## Sira tartismasi` and runs `propose` while `order_status=NEGOTIATING`.
 

@@ -21,6 +21,9 @@ Commands (run from the project root, or pass --root):
   roster | status                          agents, files, ring, clock
   leave   --agent NAME                     leave the session (ring closes the gap)
   stop                                     end the session for everyone
+  done     --agent NAME                    final round finished (after SESSION_OVER)
+  finalize --agent NAME [--archive]        final writer: wait for everyone's `done`, check
+          multi-review/final.md, then delete (or archive) every other md file
   drive   --agent NAME --exec "CMD" [...]  run the whole loop for a text-only
           model: each round pipes a prompt into CMD (stdin) and writes the
           returned markdown into the agent's own file
@@ -48,6 +51,10 @@ FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,60}\.md$")
 RESERVED_FILES = {"claude.md", "claude.local.md", "agents.md", "agent.md", "gemini.md", "codex.md",
                   "cursor.md", "copilot-instructions.md", "instructions.md", "rules.md", "readme.md",
                   "skill.md", "protocol.md", "conventions.md"}
+# Shared end result: the findings that must be fixed. Written by the final writer, kept after finalize.
+FINAL_FILE = "final.md"
+FINAL_HEADING = "## Duzeltilecekler"
+RESERVED_FILES.add(FINAL_FILE)
 BEGIN_MARK = "===BEGIN FILE==="
 END_MARK = "===END FILE==="
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "env", "__pycache__", "dist", "build",
@@ -544,7 +551,7 @@ def wait_for_tick(root, agent, max_wait=None):
         session = load_session(root)
         now = time.time()
         if not is_active(session, now):
-            return "SESSION_OVER", "SESSION_OVER"
+            return "SESSION_OVER", over_line(session)
         elapsed = now - session["start"]
         next_tick = session["start"] + (int(elapsed // session["interval"]) + 1) * session["interval"]
         target = min(next_tick, session["end"])
@@ -560,7 +567,7 @@ def wait_for_tick(root, agent, max_wait=None):
             if time.time() < target:
                 continue
         if not is_active(load_session(root)):
-            return "SESSION_OVER", "SESSION_OVER"
+            return "SESSION_OVER", over_line(load_session(root))
         settle_if_due(root)
         session = load_session(root)
         roles, ring_changed, prev_roles = snapshot(root, session, agent)
@@ -571,7 +578,25 @@ def wait_for_tick(root, agent, max_wait=None):
             files = {r: session["agents"][n]["file"] for r, n in prev_roles.items()
                      if n and n in session["agents"]}
             line += f" previous_review={files.get('review', '-')} previous_answer={files.get('answer', '-')}"
+        if in_final_phase(session):
+            line += f" final_phase=yes final_writer={final_writer(session) or '-'}"
         return "TICK", line
+
+
+def final_writer(session):
+    """Who writes final.md: the earliest-joined active agent that can run commands (not a drive agent)."""
+    cands = sorted((a["joined"], n) for n, a in active_agents(session).items() if a.get("mode") != "drive")
+    return cands[0][1] if cands else None
+
+
+def in_final_phase(session, now=None):
+    """The last tick before the end: no further tick will come, so final.md is drafted now."""
+    now = now or time.time()
+    return is_active(session, now) and session["end"] - now <= session["interval"]
+
+
+def over_line(session):
+    return f"SESSION_OVER final_writer={final_writer(session) or '-'} final_file={DIR_NAME}/{FINAL_FILE}"
 
 
 def cmd_wait(args):
@@ -664,6 +689,84 @@ def cmd_stop(args):
         save_json(session_path(args.root), session)
     registry_prune()
     print("STOPPED")
+
+
+# ---------------------------------------------------------------- final.md
+
+def mark_done(root, agent):
+    with Lock(root):
+        session = load_session(root)
+        if not session or agent not in active_agents(session):
+            sys.exit(f"ERROR: '{agent}' is not an agent of this session")
+        session["agents"][agent]["done"] = True
+        save_json(session_path(root), session)
+    return session
+
+
+def cmd_done(args):
+    session = mark_done(args.root, args.agent)
+    pending = pending_agents(session)
+    print(f"DONE {args.agent} (still writing: {','.join(pending) or '-'})")
+
+
+def pending_agents(session):
+    """Agents whose final round is not finished yet; the final writer finishes by running finalize."""
+    writer = final_writer(session)
+    return [n for n, a in active_agents(session).items() if n != writer and not a.get("done")]
+
+
+def check_final(path):
+    if not path.is_file():
+        return f"{path.name} does not exist"
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if FINAL_HEADING not in text:
+        return f"{path.name} has no '{FINAL_HEADING}' section"
+    return None
+
+
+def cmd_finalize(args):
+    """Wait until every agent is done, check final.md, then remove (or archive) all other md files."""
+    root = args.root
+    session = load_session(root)
+    if not session:
+        sys.exit("NO_SESSION")
+    writer = final_writer(session)
+    if args.agent != writer and not args.force:
+        sys.exit(f"ERROR: the final writer is '{writer}'; only it runs finalize (or pass --force)")
+    if is_active(session) and not args.force:
+        sys.exit("ERROR: session still running; finalize after SESSION_OVER (or pass --force)")
+    final = review_dir(root) / FINAL_FILE
+    problem = check_final(final)
+    if problem:
+        sys.exit(f"ERROR: {problem}. Write it first (format: PROTOCOL.md, 'final.md').")
+    deadline = time.time() + parse_duration(args.wait)
+    while not args.force:
+        pending = pending_agents(load_session(root))
+        if not pending:
+            break
+        if time.time() >= deadline:
+            sys.exit(f"WAITING_FOR: {','.join(pending)} did not run `done`; run finalize again, "
+                     "or pass --force to finalize without them")
+        time.sleep(5)
+    with Lock(root):
+        session = load_session(root)
+        rd = review_dir(root)
+        others = [f for f in sorted(rd.glob("*.md")) if f.name.lower() != FINAL_FILE]
+        if args.archive:
+            dest = state_dir(root) / "archive" / ("final-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+            dest.mkdir(parents=True, exist_ok=True)
+            for f in others:
+                os.replace(f, dest / f.name)
+        else:
+            for f in others:
+                f.unlink()
+        session["finalized"] = stamp(time.time())
+        session["stopped"] = True
+        save_json(session_path(root), session)
+    registry_prune()
+    verb = f"archived to {dest}" if args.archive else "deleted"
+    print(f"FINALIZED {DIR_NAME}/{FINAL_FILE}; {len(others)} other md file(s) {verb}: "
+          f"{', '.join(f.name for f in others) or '-'}")
 
 
 # ---------------------------------------------------------------- drive mode
@@ -889,6 +992,7 @@ def cmd_drive(args):
         print(f"[drive] {line}", flush=True)
         if kind == "SESSION_OVER":
             run_model(root, args, args.agent, info, "FINAL", line)
+            mark_done(root, args.agent)  # the final writer never waits on a drive agent
             break
         run_model(root, args, args.agent, info, line.split()[1], line)
     print("[drive] done", flush=True)
@@ -927,6 +1031,15 @@ def main():
     lv = sub.add_parser("leave")
     lv.add_argument("--agent", required=True)
     sub.add_parser("stop")
+    dn = sub.add_parser("done")
+    dn.add_argument("--agent", required=True)
+    fz = sub.add_parser("finalize")
+    fz.add_argument("--agent", required=True)
+    fz.add_argument("--wait", default="10m", help="how long to wait for the others' `done` (default 10m)")
+    fz.add_argument("--archive", action="store_true",
+                    help="move the other md files to .state/archive/ instead of deleting them")
+    fz.add_argument("--force", action="store_true",
+                    help="skip the writer, session-over and `done` checks (final.md is still checked)")
     d = sub.add_parser("drive")
     joiner(d)
     d.add_argument("--exec", required=True, help="shell command that reads the prompt on stdin, prints the answer")
@@ -940,7 +1053,7 @@ def main():
     args.root = resolve_root(args.root)
     {"join": cmd_join, "wait": cmd_wait, "propose": cmd_propose, "shuffle": cmd_shuffle,
      "roster": cmd_roster, "status": cmd_status, "leave": cmd_leave, "stop": cmd_stop,
-     "drive": cmd_drive}[args.cmd](args)
+     "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive}[args.cmd](args)
 
 
 if __name__ == "__main__":
