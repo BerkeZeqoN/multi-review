@@ -277,7 +277,8 @@ def rel(root, path):
 def print_clock(session):
     now = time.time()
     tick = int((now - session["start"]) // session["interval"])
-    print(f"interval={fmt(session['interval'])} start={stamp(session['start'])} "
+    # now= is the clock agents copy into their round log; without it they guess the time.
+    print(f"now={stamp(now)} interval={fmt(session['interval'])} start={stamp(session['start'])} "
           f"end={stamp(session['end'])} tick={tick} remaining={fmt(session['end'] - now)}"
           f"{' STOPPED' if session.get('stopped') else ''}")
     if session.get("goal"):

@@ -153,7 +153,8 @@ only when the round log says what was checked, with evidence.
      `~~C-004~~ (geri cekildi: ...)`, never delete.
    - `## Eksiklikler` → new findings from **your own research this tick**
      (see Work modes). Reviewing others is not a substitute for it.
-   - `## Tur gunlugu` → `- Tur <n> (<time>): <1-line summary>`; name the
+   - `## Tur gunlugu` → `- Tur <n> (<time>): <1-line summary>`; `<time>` is
+     the `now=` value from the `wait` output, never a guess. Name the
      area/files you researched this tick.
 4. Your own research is due **every tick**, changed files or not (except
    `YOUR_TASK=verify-only`). Found nothing → log what you checked and how
