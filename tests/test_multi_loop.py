@@ -164,6 +164,13 @@ class Joining(TempProject):
             with self.assertRaises(SystemExit, msg=name):
                 self.create(file=name)
 
+    def test_goal_is_saved_and_shown(self):
+        _, out = self.create(goal="  repo quality  ")
+        self.assertEqual(m.load_session(str(self.root))["goal"], "repo quality")
+        self.assertIn("GOAL=repo quality", out)
+        _, out = self.join("codex", goal="ignored for joiners")
+        self.assertIn("GOAL=repo quality", out)
+
     def test_custom_file_and_prefix(self):
         (_, info), _ = self.create(file="claude-opus.md", prefix="cl")
         self.assertEqual((info["file"], info["prefix"]), ("claude-opus.md", "CL"))

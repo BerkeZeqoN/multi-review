@@ -13,7 +13,7 @@ agent (its reviewer). When an agent joins or leaves, the ring is rebuilt:
 State lives in <root>/multi-review/.state/.
 
 Commands (run from the project root, or pass --root):
-  join    --agent NAME [--interval 5m --duration 2h --order-mode random|negotiated]
+  join    --agent NAME [--interval 5m --duration 2h --order-mode random|negotiated --goal "..."]
           create a session (needs interval, duration, order mode) or join the active one
   wait    --agent NAME [--max-wait 9m]     block until the next tick
   propose --agent NAME --order a,b,c       negotiated mode: vote for a ring order
@@ -263,6 +263,8 @@ def print_clock(session):
     print(f"interval={fmt(session['interval'])} start={stamp(session['start'])} "
           f"end={stamp(session['end'])} tick={tick} remaining={fmt(session['end'] - now)}"
           f"{' STOPPED' if session.get('stopped') else ''}")
+    if session.get("goal"):
+        print(f"GOAL={session['goal']}")
 
 
 def current_tick(session):
@@ -424,7 +426,7 @@ def archive_old_files(root, now):
 
 
 def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, mode="agent", order_mode=None,
-            resume=False):
+            resume=False, goal=None):
     if not NAME_RE.match(agent):
         sys.exit("ERROR: --agent must be lowercase [a-z0-9-], 1-24 chars (e.g. claude, codex, gemini-2)")
     if file and not FILE_RE.match(file):
@@ -446,7 +448,8 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
                 sys.exit("ERROR: duration must be >= interval")
             session = {"start": now, "interval": iv, "end": now + du, "root": str(Path(root).resolve()),
                        "stopped": False, "order_mode": order_mode, "agents": {}, "ring": [],
-                       "ring_version": 0, "ring_log": [], "negotiation": None}
+                       "ring_version": 0, "ring_log": [], "negotiation": None,
+                       "goal": (goal or "").strip() or None}
             for old in state_dir(root).glob("agent_*.json"):
                 old.unlink()
             archived = archive_old_files(root, now)
@@ -501,7 +504,7 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
 
 def cmd_join(args):
     do_join(args.root, args.agent, args.interval, args.duration, args.file, args.prefix,
-            order_mode=args.order_mode, resume=args.resume)
+            order_mode=args.order_mode, resume=args.resume, goal=args.goal)
 
 
 def snapshot(root, session, agent):
@@ -902,6 +905,7 @@ def build_prompt(root, session, agent, info, round_label, tick_line, max_chars):
     sections = [
         ("You are one agent in a multi-agent mutual code review. Follow the protocol strictly.", None),
         (f"YOUR NAME: {agent}\nYOUR PREFIX: {info['prefix']}\nYOUR FILE: {DIR_NAME}/{info['file']}\n"
+         f"GOAL (from the user; prioritise it): {session.get('goal') or '-'}\n"
          f"ROUND: {round_label}\nCLOCK: {tick_line}\nNOW: {stamp(time.time())}\n"
          f"RING: {ring_text(session)} (you review the next file, answer the previous one; "
          "you do not take part in order negotiation)", None),
@@ -985,7 +989,7 @@ def run_model(root, args, agent, info, round_label, tick_line):
 def cmd_drive(args):
     root = args.root
     _, info = do_join(root, args.agent, args.interval, args.duration, args.file, args.prefix, mode="drive",
-                      order_mode=args.order_mode, resume=args.resume)
+                      order_mode=args.order_mode, resume=args.resume, goal=args.goal)
     run_model(root, args, args.agent, info, "0", "round 0 (initial findings)")
     while True:
         kind, line = wait_for_tick(root, args.agent)
@@ -1015,6 +1019,7 @@ def main():
         sp.add_argument("--order-mode", choices=ORDER_MODES, help="only used when creating a session")
         sp.add_argument("--file", help="own md file name (default: <prefix>.md, e.g. c.md, co.md)")
         sp.add_argument("--prefix", help="finding id prefix (default: auto from name)")
+        sp.add_argument("--goal", help="only used when creating a session: what the user wants reviewed")
         sp.add_argument("--resume", action="store_true",
                         help="you are this already-active agent and lost your context (e.g. after /clear)")
 

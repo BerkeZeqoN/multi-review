@@ -36,7 +36,14 @@ session needs nothing (`/multi-review join`).
    - **Rastgele döngü (`random`)** - the script links the agents' files in a
      random ring and reshuffles it on every join.
 
+4. **goal** (optional) - what the user wants reviewed, i.e. any free text in
+   the `/multi-review` arguments besides the path and durations ("security",
+   "make the repo release-ready"). Pass it as `--goal "..."`. It is saved in
+   the session and printed as `GOAL=...` to every agent on `join`/`wait`.
+
 Example: `/multi-review 5m 2h` → ask order mode → create.
+Example: `/multi-review "D:/proj" guvenlik acigi var mi` → ask interval, duration,
+order mode → create with `--goal "guvenlik acigi var mi"`.
 
 ## Script path
 
@@ -53,7 +60,7 @@ Example: `/multi-review 5m 2h` → ask order mode → create.
 
 ```bash
 python SCRIPT roster                     # who is in? (NO_SESSION = nobody)
-python SCRIPT --root "D:/proj" join --agent claude --interval 5m --duration 2h --order-mode negotiated   # creator
+python SCRIPT --root "D:/proj" join --agent claude --interval 5m --duration 2h --order-mode negotiated --goal "security"   # creator
 python SCRIPT join --agent codex         # from any folder: finds the project, gets co.md, roles printed
 python SCRIPT join --agent gemini --file gemini-pro.md --prefix GP   # choose your own file name + id prefix
 ```

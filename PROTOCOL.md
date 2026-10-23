@@ -93,7 +93,8 @@ Agents never argue about order; `shuffle` only when the user asks.
 1. `roster` → choose a unique name. `NO_SESSION` → you are the creator: the
    user must have chosen interval, duration and order mode.
 2. `join` → note `YOU=`, `prefix=`, `own_file=`, `YOUR_ROLE`.
-3. **Round 0:** explore the project (structure, README, configs, main code,
+3. **Round 0:** if `join` printed `GOAL=...`, the user's goal comes first:
+   look for findings about it before anything else. Then explore the project (structure, README, configs, main code,
    tests; run safe read-only checks like lint/type-check/tests).
 4. **Late joiner extra:** read your `review` and `answer` files fully. Skim the
    remaining files only to avoid duplicating their findings - you do not
