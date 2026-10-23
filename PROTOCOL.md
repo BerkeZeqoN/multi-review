@@ -244,7 +244,10 @@ anything not carried into `final.md` is gone.
 - Onerilen ilk 5 is: ...
 ```
 
-3. **Not the final writer:** run `done --agent NAME`. Your file will be deleted
+3. **Not the final writer:** run `done --agent NAME` once you have reviewed
+   `final.md`. `done` refuses with `WAITING_FOR_FINAL` while there is no draft
+   (the user ran `stop` before a `final_phase` tick): the final writer drafts
+   it now; re-run `wait`-free, e.g. after a minute, read it, object, then `done`. Your file will be deleted
    by `finalize`; everything that matters must already be in `final.md` or in
    your objections.
 4. **Final writer:** read every `## final.md itirazlari`, fix `final.md` (or

@@ -390,6 +390,17 @@ class Final(TempProject):
         self.assertIn("WAITING_FOR", str(cm.exception.code))
         self.assertTrue((rd / "co.md").exists())
 
+    def test_done_waits_for_final_draft(self):
+        # Early `stop`: no final-phase tick, so others must not finish before the draft exists.
+        rd = self.setup_over()
+        with self.assertRaises(SystemExit) as cm:
+            quiet(m.cmd_done, self.args("codex"))
+        self.assertIn("WAITING_FOR_FINAL", str(cm.exception.code))
+        quiet(m.cmd_done, self.args("codex", force=True))
+        self.write_final(rd)
+        _, out = quiet(m.cmd_done, self.args("codex"))
+        self.assertIn("DONE codex", out)
+
     def test_finalize_deletes_everything_but_final(self):
         rd = self.setup_over()
         self.write_final(rd)

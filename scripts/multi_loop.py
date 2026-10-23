@@ -797,6 +797,14 @@ def mark_done(root, agent):
 
 
 def cmd_done(args):
+    session = load_session(args.root)
+    writer = final_writer(session) if session else None
+    problem = check_final(review_dir(args.root) / FINAL_FILE)
+    if problem and args.agent != writer and not args.force:
+        # Without a draft there is nothing to object to; `done` now would skip the review of final.md
+        # (e.g. the user ran `stop` before the final phase tick).
+        sys.exit(f"WAITING_FOR_FINAL: {problem}. Wait for {writer} to draft it, read it, object under "
+                 "'## final.md itirazlari' in your file, then run done again (or --force)")
     session = mark_done(args.root, args.agent)
     pending = pending_agents(session)
     print(f"DONE {args.agent} (still writing: {','.join(pending) or '-'})")
@@ -1135,6 +1143,7 @@ def main():
     sub.add_parser("stop")
     dn = sub.add_parser("done")
     dn.add_argument("--agent", required=True)
+    dn.add_argument("--force", action="store_true", help="mark done even though final.md is not drafted yet")
     fz = sub.add_parser("finalize")
     fz.add_argument("--agent", required=True)
     fz.add_argument("--wait", default="10m", help="how long to wait for the others' `done` (default 10m)")
