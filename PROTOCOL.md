@@ -98,7 +98,8 @@ Agents never argue about order; `shuffle` only when the user asks.
    tests; run safe read-only checks like lint/type-check/tests).
 4. **Late joiner extra:** read your `review` and `answer` files fully. Skim the
    remaining files only to avoid duplicating their findings - you do not
-   review them.
+   review them. Joining late does **not** make you a commentator: unless
+   `YOUR_TASK=verify-only`, you research the code yourself from Round 0 on.
 5. Write findings to `## Eksiklikler`, add `### <review file> incelemesi` under
    `## Incelemeler`, then start `wait`. Negotiated mode with
    `order_status=NEGOTIATING` → also argue and `propose` (see above).
@@ -112,6 +113,21 @@ Agents never argue about order; `shuffle` only when the user asks.
   time this round, then stop following it.
 - `previous_review` agent: your open objections to it stay in your file; its
   new reviewer may adopt them.
+
+## Work modes (chosen once by the user at session start)
+
+`join` and every `wait` print `WORK_MODE=... YOUR_TASK=...`:
+
+| mode | who researches the code | your task |
+|---|---|---|
+| `research` (default) | everyone, every tick | `research+review`: own findings + review your target |
+| `split` | everyone, in an assigned area (`AREAS=...`) | `research-area:<areas>+review`: dig into your area first; cross-area findings are welcome |
+| `review` | only the lead (earliest-joined agent with a terminal) | lead: `research+review`; others: `verify-only` (verify, reproduce, challenge) |
+
+Every `TICK` line carries `own_findings=N new=K` (count of `### <PREFIX>-NNN`
+headings in your file). In `research`/`split`, and for the lead in `review`,
+2 ticks with `new=0` add `WORK_WARNING=...`. A clean area is a valid result
+only when the round log says what was checked, with evidence.
 
 ## Every TICK
 
@@ -127,10 +143,15 @@ Agents never argue about order; `shuffle` only when the user asks.
    - `## Bana gelen itirazlara cevap` → answer every objection to your ids in
      your `answer` file: accept & fix the finding, or defend with evidence. Withdrawn:
      `~~C-004~~ (geri cekildi: ...)`, never delete.
-   - `## Eksiklikler` → new findings.
-   - `## Tur gunlugu` → `- Tur <n> (<time>): <1-line summary>`.
-4. Nothing changed and nothing pending → still do a fresh pass for new
-   deficiencies. Never write "degisiklik yok" and stop.
+   - `## Eksiklikler` → new findings from **your own research this tick**
+     (see Work modes). Reviewing others is not a substitute for it.
+   - `## Tur gunlugu` → `- Tur <n> (<time>): <1-line summary>`; name the
+     area/files you researched this tick.
+4. Your own research is due **every tick**, changed files or not (except
+   `YOUR_TASK=verify-only`). Found nothing → log what you checked and how
+   (`Taze tarama: src/auth/*, grep -n token → temiz`). Never write
+   "degisiklik yok" and stop. `WORK_WARNING` in the `wait` line means you
+   skipped this for 2 ticks: fix it first.
 5. Run `wait` again. Never end your turn between ticks while the session is
    active - the loop is the task.
 

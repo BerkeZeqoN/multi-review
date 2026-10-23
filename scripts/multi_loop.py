@@ -13,7 +13,8 @@ agent (its reviewer). When an agent joins or leaves, the ring is rebuilt:
 State lives in <root>/multi-review/.state/.
 
 Commands (run from the project root, or pass --root):
-  join    --agent NAME [--interval 5m --duration 2h --order-mode random|negotiated --goal "..."]
+  join    --agent NAME [--interval 5m --duration 2h --order-mode random|negotiated
+          --work-mode research|split|review --areas a,b --goal "..."]
           create a session (needs interval, duration, order mode) or join the active one
   wait    --agent NAME [--max-wait 9m]     block until the next tick
   propose --agent NAME --order a,b,c       negotiated mode: vote for a ring order
@@ -63,6 +64,11 @@ SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "env", "__pycache__", "dis
              ".next", ".nuxt", "out", "target", ".idea", ".vscode", "coverage", DIR_NAME,
              ".duo", ".cache", "vendor"}
 ORDER_MODES = ("random", "negotiated")
+# Who digs into the code. research: everyone, every tick. split: everyone, in an assigned area.
+# review: only the lead (earliest-joined agent with a terminal); the others verify its findings.
+WORK_MODES = ("research", "split", "review")
+IDLE_TICKS_WARN = 2
+FALLBACK_AREAS = ["correctness", "security", "tests", "docs-ux"]
 NEGOTIATE_TICKS = 2
 # Stable prefixes so the usual tools get the familiar files (c.md, a.md, co.md, ...).
 KNOWN_PREFIX = {"claude": "C", "antigravity": "A", "codex": "CO", "gemini": "G", "cursor": "CU",
@@ -395,6 +401,67 @@ def print_ring(session, me=None):
         target, reviewer = ring_neighbors(session, me)
         f = lambda n: session["agents"][n]["file"] if n else "-"
         print(f"YOUR_ROLE: review={f(target)} answer={f(reviewer)}")
+        print(f"WORK_MODE={session.get('work_mode', 'research')} YOUR_TASK={your_task(session, me)}")
+
+
+def default_areas(root):
+    """Top-level folders (and the root files as one area) of the project; generic aspects if too few."""
+    files, _ = project_tree(root, limit=100000)
+    areas = sorted({f.split("/")[0] + "/" for f in files if "/" in f})
+    if any("/" not in f for f in files):
+        areas.append("(root files)")
+    return areas if len(areas) >= 2 else list(FALLBACK_AREAS)
+
+
+def agent_areas(session, agent):
+    """Split mode: areas spread over the ring so every area has an owner and every agent has one."""
+    areas, ring = session.get("areas") or [], ring_members(session)
+    if agent not in ring or not areas:
+        return []
+    i = ring.index(agent)
+    if len(ring) >= len(areas):
+        return [areas[i % len(areas)]]
+    return areas[i::len(ring)]
+
+
+def work_lead(session):
+    return final_writer(session)
+
+
+def your_task(session, agent):
+    mode = session.get("work_mode", "research")
+    if mode == "split":
+        return "research-area:" + ",".join(agent_areas(session, agent) or ["-"]) + "+review"
+    if mode == "review" and agent != work_lead(session):
+        return "verify-only (lead=" + str(work_lead(session)) + ")"
+    return "research+review"
+
+
+def must_research(session, agent):
+    return session.get("work_mode", "research") != "review" or agent == work_lead(session)
+
+
+def count_findings(root, info):
+    f = review_dir(root) / info["file"]
+    if not f.exists():
+        return 0
+    text = f.read_text(encoding="utf-8", errors="replace")
+    return len(re.findall(rf"^### {re.escape(info['prefix'])}-\d+", text, re.M))
+
+
+def work_check(root, session, agent):
+    """Count the agent's own findings; flag agents that only comment when they are supposed to research."""
+    path = state_dir(root) / f"agent_{agent}.work.json"
+    state = load_json(path, {"count": None, "idle": 0})
+    count = count_findings(root, session["agents"][agent])
+    new = 0 if state["count"] is None else max(0, count - state["count"])
+    idle = 0 if new or state["count"] is None else state["idle"] + 1
+    save_json(path, {"count": count, "idle": idle})
+    line = f" own_findings={count} new={new}"
+    if must_research(session, agent) and idle >= IDLE_TICKS_WARN:
+        line += (f" WORK_WARNING=no_new_findings_for_{idle}_ticks(research the code yourself; "
+                 "if your area is clean, log what you checked with evidence)")
+    return line
 
 
 def print_roster(root, session, me=None):
@@ -428,7 +495,7 @@ def archive_old_files(root, now):
 
 
 def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, mode="agent", order_mode=None,
-            resume=False, goal=None):
+            resume=False, goal=None, work_mode=None, areas=None):
     if not NAME_RE.match(agent):
         sys.exit("ERROR: --agent must be lowercase [a-z0-9-], 1-24 chars (e.g. claude, codex, gemini-2)")
     if file and not FILE_RE.match(file):
@@ -451,14 +518,18 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
             session = {"start": now, "interval": iv, "end": now + du, "root": str(Path(root).resolve()),
                        "stopped": False, "order_mode": order_mode, "agents": {}, "ring": [],
                        "ring_version": 0, "ring_log": [], "negotiation": None,
-                       "goal": (goal or "").strip() or None}
+                       "goal": (goal or "").strip() or None, "work_mode": work_mode or "research"}
+            if session["work_mode"] == "split":
+                session["areas"] = [a.strip() for a in (areas or "").split(",") if a.strip()] or default_areas(root)
             for old in state_dir(root).glob("agent_*.json"):
                 old.unlink()
             archived = archive_old_files(root, now)
             if archived:
                 print(f"ARCHIVED {len(archived)} file(s) from the previous session -> {archived[0].parent}")
             registry_add(root)
-            print(f"CREATED new session (order_mode={order_mode})")
+            print(f"CREATED new session (order_mode={order_mode}, work_mode={session['work_mode']})")
+            if session.get("areas"):
+                print(f"AREAS={','.join(session['areas'])}")
         else:
             print(f"JOINED existing session (started {stamp(session['start'])}, "
                   f"order_mode={session['order_mode']}; your --interval/--duration/--order-mode are ignored)")
@@ -506,7 +577,8 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
 
 def cmd_join(args):
     do_join(args.root, args.agent, args.interval, args.duration, args.file, args.prefix,
-            order_mode=args.order_mode, resume=args.resume, goal=args.goal)
+            order_mode=args.order_mode, resume=args.resume, goal=args.goal,
+            work_mode=args.work_mode, areas=args.areas)
 
 
 def snapshot(root, session, agent):
@@ -583,6 +655,7 @@ def wait_for_tick(root, agent, max_wait=None):
             files = {r: session["agents"][n]["file"] for r, n in prev_roles.items()
                      if n and n in session["agents"]}
             line += f" previous_review={files.get('review', '-')} previous_answer={files.get('answer', '-')}"
+        line += work_check(root, session, agent)
         if in_final_phase(session):
             line += f" final_phase=yes final_writer={final_writer(session) or '-'}"
         return "TICK", line
@@ -909,6 +982,7 @@ def build_prompt(root, session, agent, info, round_label, tick_line, max_chars):
         (f"YOUR NAME: {agent}\nYOUR PREFIX: {info['prefix']}\nYOUR FILE: {DIR_NAME}/{info['file']}\n"
          f"GOAL (from the user; prioritise it): {session.get('goal') or '-'}\n"
          f"ROUND: {round_label}\nCLOCK: {tick_line}\nNOW: {stamp(time.time())}\n"
+         f"WORK_MODE: {session.get('work_mode', 'research')} YOUR_TASK: {your_task(session, agent)}\n"
          f"RING: {ring_text(session)} (you review the next file, answer the previous one; "
          "you do not take part in order negotiation)", None),
         ("PROTOCOL:\n" + (protocol or "(PROTOCOL.md missing)"), 3),
@@ -991,7 +1065,8 @@ def run_model(root, args, agent, info, round_label, tick_line):
 def cmd_drive(args):
     root = args.root
     _, info = do_join(root, args.agent, args.interval, args.duration, args.file, args.prefix, mode="drive",
-                      order_mode=args.order_mode, resume=args.resume, goal=args.goal)
+                      order_mode=args.order_mode, resume=args.resume, goal=args.goal,
+            work_mode=args.work_mode, areas=args.areas)
     run_model(root, args, args.agent, info, "0", "round 0 (initial findings)")
     while True:
         kind, line = wait_for_tick(root, args.agent)
@@ -1020,6 +1095,10 @@ def main():
         sp.add_argument("--interval", help="only used when creating a session")
         sp.add_argument("--duration", help="only used when creating a session")
         sp.add_argument("--order-mode", choices=ORDER_MODES, help="only used when creating a session")
+        sp.add_argument("--work-mode", choices=WORK_MODES,
+                        help="only used when creating a session: research (default, everyone researches), "
+                             "split (each agent owns an area), review (only the lead researches)")
+        sp.add_argument("--areas", help="split mode: comma-separated areas (default: top-level folders)")
         sp.add_argument("--file", help="own md file name (default: <prefix>.md, e.g. c.md, co.md)")
         sp.add_argument("--prefix", help="finding id prefix (default: auto from name)")
         sp.add_argument("--goal", help="only used when creating a session: what the user wants reviewed")

@@ -36,14 +36,26 @@ session needs nothing (`/multi-review join`).
    - **Rastgele döngü (`random`)** - the script links the agents' files in a
      random ring and reshuffles it on every join.
 
-4. **goal** (optional) - what the user wants reviewed, i.e. any free text in
+4. **work mode** - **always ask the user** when creating, together with the
+   order mode (Claude Code: AskUserQuestion with exactly these three options),
+   pass as `--work-mode`:
+   - **Herkes araştırsın (`research`)** - default. Every agent digs into the
+     code itself every tick, not only comments on others. `wait` prints
+     `own_findings=N new=K` and a `WORK_WARNING` after 2 ticks without a new
+     finding.
+   - **Alan paylaşımı (`split`)** - every agent owns part of the project
+     (`--areas api,ui,tests`, default: top-level folders) and researches it;
+     `YOUR_TASK=research-area:...` shows yours.
+   - **Sadece doğrulama (`review`)** - only the lead (earliest-joined agent)
+     researches; the others verify its findings.
+5. **goal** (optional) - what the user wants reviewed, i.e. any free text in
    the `/multi-review` arguments besides the path and durations ("security",
    "make the repo release-ready"). Pass it as `--goal "..."`. It is saved in
    the session and printed as `GOAL=...` to every agent on `join`/`wait`.
 
-Example: `/multi-review 5m 2h` → ask order mode → create.
+Example: `/multi-review 5m 2h` → ask order mode + work mode → create.
 Example: `/multi-review "D:/proj" guvenlik acigi var mi` → ask interval, duration,
-order mode → create with `--goal "guvenlik acigi var mi"`.
+order mode, work mode → create with `--goal "guvenlik acigi var mi"`.
 
 ## Script path
 
@@ -60,7 +72,7 @@ order mode → create with `--goal "guvenlik acigi var mi"`.
 
 ```bash
 python SCRIPT roster                     # who is in? (NO_SESSION = nobody)
-python SCRIPT --root "D:/proj" join --agent claude --interval 5m --duration 2h --order-mode negotiated --goal "security"   # creator
+python SCRIPT --root "D:/proj" join --agent claude --interval 5m --duration 2h --order-mode negotiated --work-mode research --goal "security"   # creator
 python SCRIPT join --agent codex         # from any folder: finds the project, gets co.md, roles printed
 python SCRIPT join --agent gemini --file gemini-pro.md --prefix GP   # choose your own file name + id prefix
 ```

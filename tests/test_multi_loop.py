@@ -266,6 +266,65 @@ class Waiting(TempProject):
         self.assertLess(time.time() - began, 15)
 
 
+class WorkModes(TempProject):
+    def write_findings(self, name, n):
+        info = m.load_session(str(self.root))["agents"][name]
+        body = "".join(f"### {info['prefix']}-{i:03d} [Orta] x\n" for i in range(1, n + 1))
+        (self.root / m.DIR_NAME / info["file"]).write_text("# f\n## Eksiklikler\n" + body)
+
+    def test_default_is_research_for_everyone(self):
+        _, out = self.create()
+        self.join("codex")
+        s = m.load_session(str(self.root))
+        self.assertEqual(s["work_mode"], "research")
+        self.assertIn("WORK_MODE=research YOUR_TASK=research+review", out)
+        self.assertTrue(m.must_research(s, "codex"))
+
+    def test_idle_researcher_gets_warning(self):
+        # The reported bug: a late joiner that only comments must be flagged.
+        self.create()
+        self.join("codex")
+        s = m.load_session(str(self.root))
+        self.write_findings("codex", 1)
+        self.assertNotIn("WORK_WARNING", m.work_check(str(self.root), s, "codex"))  # baseline
+        self.assertNotIn("WORK_WARNING", m.work_check(str(self.root), s, "codex"))  # idle 1
+        self.assertIn("WORK_WARNING", m.work_check(str(self.root), s, "codex"))     # idle 2
+        self.write_findings("codex", 2)
+        line = m.work_check(str(self.root), s, "codex")
+        self.assertIn("own_findings=2 new=1", line)
+        self.assertNotIn("WORK_WARNING", line)
+
+    def test_review_mode_only_lead_must_research(self):
+        self.create(work_mode="review")
+        self.join("codex")
+        s = m.load_session(str(self.root))
+        self.assertTrue(m.must_research(s, "claude"))
+        self.assertFalse(m.must_research(s, "codex"))
+        self.assertIn("verify-only (lead=claude)", m.your_task(s, "codex"))
+        for _ in range(3):
+            line = m.work_check(str(self.root), s, "codex")
+        self.assertNotIn("WORK_WARNING", line)
+
+    def test_split_mode_covers_every_area(self):
+        _, out = self.create(work_mode="split", areas="api, ui ,db,docs,tests")
+        self.join("codex")
+        self.join("gemini")
+        s = m.load_session(str(self.root))
+        self.assertIn("AREAS=api,ui,db,docs,tests", out)
+        got = [a for n in m.ring_members(s) for a in m.agent_areas(s, n)]
+        self.assertEqual(sorted(got), sorted(s["areas"]))
+        self.assertTrue(all(m.agent_areas(s, n) for n in m.ring_members(s)))
+
+    def test_split_mode_default_areas_from_tree(self):
+        (self.root / "src").mkdir()
+        (self.root / "src" / "a.py").write_text("x")
+        (self.root / "docs").mkdir()
+        (self.root / "docs" / "b.md").write_text("x")
+        (self.root / "setup.cfg").write_text("x")
+        self.create(work_mode="split")
+        self.assertEqual(m.load_session(str(self.root))["areas"], ["docs/", "src/", "(root files)"])
+
+
 class Final(TempProject):
     def args(self, agent, **kw):
         base = {"root": str(self.root), "agent": agent, "wait": "1s", "archive": False, "force": False}
