@@ -35,4 +35,4 @@
 - A-002: Windows lock `PermissionError`. antigravity: crash risk / claude: only "delete pending", Dusuk. Both agree to retry.
 
 ## Kapsam disi
-- A-003 (geri cekildi: CI already existed in `8ad0f4e`).
+- A-003 (geri cekildi: CI already existed in `75344b2`).
