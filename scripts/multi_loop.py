@@ -34,13 +34,14 @@ Commands (run from the project root, or pass --root):
 __version__ = "0.7.0"
 
 import argparse
+import contextlib
+import contextvars
 import json
 import os
 import random
 import re
 import subprocess
 import sys
-import threading
 import time
 import urllib.request
 from collections import Counter
@@ -120,21 +121,41 @@ def stamp(ts):
 # original layout (<root>/multi-review/); any other name lives in <root>/multi-review/<name>/.
 DEFAULT_SESSION = "main"
 SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-SESSION = DEFAULT_SESSION  # the session every path helper uses; set once by main() / set_session()
+# The session every path helper uses. The CLI sets it once (main); the chat hub sets it per request
+# with using_session(). A ContextVar keeps that per thread, so concurrent requests never see each other's.
+_SESSION = contextvars.ContextVar("multi_review_session", default=DEFAULT_SESSION)
 
 
-def set_session(name):
-    global SESSION
+def current_session():
+    return _SESSION.get()
+
+
+def valid_session(name):
     name = (name or DEFAULT_SESSION).strip().lower()
     if not SESSION_RE.match(name) or name == STATE_DIR.lstrip("."):
         sys.exit("ERROR: --session must be lowercase [a-z0-9_-], 1-32 chars, e.g. security")
-    SESSION = name
     return name
+
+
+def set_session(name):
+    name = valid_session(name)
+    _SESSION.set(name)
+    return name
+
+
+@contextlib.contextmanager
+def using_session(name):
+    """Run a block against another session (chat hub), then switch back."""
+    token = _SESSION.set(valid_session(name))
+    try:
+        yield
+    finally:
+        _SESSION.reset(token)
 
 
 def session_rel(session=None):
     """Folder of a session relative to the project root, e.g. multi-review or multi-review/security."""
-    session = session or SESSION
+    session = session or current_session()
     return DIR_NAME if session == DEFAULT_SESSION else f"{DIR_NAME}/{session}"
 
 
@@ -213,8 +234,8 @@ def registry_add(root):
     root = str(Path(root).resolve())
     with registry_lock():
         entries = [{"root": e["root"], "session": e["session"], "created": e.get("created")}
-                   for e in registry_active() if not same_session(e, root, SESSION)]
-        entries.append({"root": root, "session": SESSION, "created": stamp(time.time())})
+                   for e in registry_active() if not same_session(e, root, current_session())]
+        entries.append({"root": root, "session": current_session(), "created": stamp(time.time())})
         save_json(REGISTRY, entries)
 
 
@@ -274,7 +295,7 @@ def resolve_root(arg, session=None):
 
 def next_cmd(root, rest):
     """The exact next command, so an agent never drops --session and lands in another review."""
-    sess = f" --session {SESSION}" if SESSION != DEFAULT_SESSION else ""
+    sess = f" --session {current_session()}" if current_session() != DEFAULT_SESSION else ""
     return f"NEXT: python \"{Path(__file__).resolve()}\" --root \"{Path(root).resolve()}\"{sess} {rest}"
 
 
@@ -713,10 +734,10 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
                                            ("--areas", areas), ("--goal", goal)) if v]
             if creator_only:
                 # These would be silently dropped: the user meant a new review, not this one.
-                sys.exit(f"SESSION_EXISTS: session '{SESSION}' is already active in {Path(root).resolve()} "
+                sys.exit(f"SESSION_EXISTS: session '{current_session()}' is already active in {Path(root).resolve()} "
                          f"(goal={session.get('goal') or '-'}). To join it, drop {' '.join(creator_only)}. "
                          "To run another review at the same time, add --session <new-name>.")
-            print(f"JOINED existing session '{SESSION}' (started {stamp(session['start'])}, "
+            print(f"JOINED existing session '{current_session()}' (started {stamp(session['start'])}, "
                   f"order_mode={session['order_mode']}, work_mode={session.get('work_mode', 'research')})")
         agents = session.setdefault("agents", {})
         if agent in agents:
@@ -762,7 +783,7 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
         print(user_line(earlier))
     if created and mode != "drive":
         open_chat_hub(root)  # drive sessions run headless (CI, scripts)
-    print(f"ROOT={Path(root).resolve()} SESSION={SESSION} DIR={session_rel()}")
+    print(f"ROOT={Path(root).resolve()} SESSION={current_session()} DIR={session_rel()}")
     print(f"YOU={agent} prefix={info['prefix']} own_file={own}")
     print_clock(session)
     print_roster(root, session, me=agent)
@@ -1154,7 +1175,7 @@ def describe(root):
                        "left": bool(a.get("left")),
                        "stale": bool(session) and is_active(session, now) and is_stale(root, session, name, now),
                        "typing": is_active(session, now) and not a.get("left") and now - mtime < TYPING_WINDOW})
-    return {"session": {"name": SESSION, "project": Path(root).resolve().name, "title": session.get("title"),
+    return {"session": {"name": current_session(), "project": Path(root).resolve().name, "title": session.get("title"),
                         "goal": session.get("goal"),
                         "start": session.get("start", now), "end": session.get("end", now),
                         "interval": session.get("interval", 0), "order_mode": session.get("order_mode"),
@@ -1164,9 +1185,6 @@ def describe(root):
             "agents": agents}
 
 
-# The chat hub serves every session of this machine from one process, so it switches the module-wide
-# SESSION per request. Requests run in threads: one lock keeps a switch and the work under it together.
-HUB_LOCK = threading.Lock()
 RECENT_KEEP = 30
 AUTO_CHAT = os.environ.get("MULTI_REVIEW_NO_CHAT") != "1"  # tests and CI set it; `join` then opens nothing
 
@@ -1187,8 +1205,8 @@ def remember_session(root):
             old = load_json(recent_path(), []) or []
         except (OSError, ValueError):
             old = []
-        keep = [e for e in old if not same_session(e, root, SESSION)][-(RECENT_KEEP - 1):]
-        save_json(recent_path(), keep + [{"root": root, "session": SESSION, "created": time.time()}])
+        keep = [e for e in old if not same_session(e, root, current_session())][-(RECENT_KEEP - 1):]
+        save_json(recent_path(), keep + [{"root": root, "session": current_session(), "created": time.time()}])
 
 
 TITLE_MAX = 60
@@ -1219,7 +1237,7 @@ def cmd_rename(args):
         title = set_title(args.root, args.title)
     except ValueError as e:
         sys.exit(f"ERROR: {e}")
-    print(f"RENAMED session '{SESSION}' -> {title or '(no title)'}")
+    print(f"RENAMED session '{current_session()}' -> {title or '(no title)'}")
 
 
 def session_key(root, session):
@@ -1273,13 +1291,8 @@ class ChatHub:
 
     def _run(self, key, fn):
         root, _, session = key.rpartition("|")
-        with HUB_LOCK:
-            previous = SESSION
-            set_session(session)
-            try:
-                return fn(root)
-            finally:
-                set_session(previous)
+        with using_session(session):
+            return fn(root)
 
     def state_dir(self, key):
         return self._run(key, state_dir)
@@ -1318,7 +1331,7 @@ def open_chat_hub(root):
         print(f"CHAT_PANEL already open: http://127.0.0.1:{port}/ (it switches to this session by itself)")
         return
     args = [sys.executable, str(Path(__file__).resolve()), "--root", str(Path(root).resolve()),
-            "--session", SESSION, "chat"]
+            "--session", current_session(), "chat"]
     kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
           "cwd": str(Path(root).resolve())}
     if os.name == "nt":
@@ -1343,7 +1356,7 @@ def cmd_chat(args):
     if port and not args.no_open:
         print(f"CHAT_PANEL already open: http://127.0.0.1:{port}/ (pick the session in its list)")
         return
-    initial = session_key(args.root, SESSION) if peek_session(args.root, SESSION) else None
+    initial = session_key(args.root, current_session()) if peek_session(args.root, current_session()) else None
     if initial:
         log_events(args.root)
         remember_session(args.root)  # sessions from before 0.7.0 are not in recent.json yet

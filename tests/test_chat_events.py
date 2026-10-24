@@ -380,6 +380,24 @@ class UserMessages(Sync):
         self.assertIsNone(m.hub_running())
 
 
+class SessionContext(unittest.TestCase):
+    def test_threads_do_not_share_the_session(self):
+        seen = {}
+
+        def worker(name):
+            with m.using_session(name):
+                time.sleep(0.05)  # both threads are inside their block at the same time
+                seen[name] = m.session_rel()
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in ("alpha", "beta")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(seen, {"alpha": "multi-review/alpha", "beta": "multi-review/beta"})
+        self.assertEqual(m.current_session(), "main")  # the caller's session is untouched
+
+
 class EmptyHub:
     def sessions(self):
         return []
