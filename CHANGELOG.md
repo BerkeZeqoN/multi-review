@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
 ### Added
 - Message box in the `chat` page: the user writes to all agents (or `@name` to one). `wait`
   returns early with `USER_MESSAGE`; agents answer under `## Kullaniciya cevap` and the answer
@@ -111,7 +113,8 @@ All notable changes to this project are documented here. The format follows
 - First public version: N-agent review ring, shared clock, random or
   negotiated ring order, `drive` for text-only models.
 
-[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.3.0...v0.4.0
