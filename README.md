@@ -142,9 +142,15 @@ Durations: `30s`, `5m`, `10dk`, `2h`, `2sa`, `1h30m`. A bare number means minute
 
 ## Live chat view
 
+Creating a session opens the panel by itself, in its own Edge window. One
+panel serves **every** session on this machine: the list on the left shows the
+running ones (live, with a message box) and the recently finished ones (played
+back at chat speed); a session started while the panel is open is picked up
+and selected within a few seconds.
+
 ```bash
-python $S chat              # live: http://127.0.0.1:8777, updates every 2 s
-python $S chat --replay     # a finished session, played back at chat speed
+python $S chat              # open the panel again after closing it
+python $S chat --replay     # open it on this session as a replay
 ```
 
 Findings, verdicts (`KABUL`/`RED`/`KISMEN`), answers, withdrawals, joins,
@@ -163,10 +169,13 @@ page runs on localhost only and loads nothing from the internet.
 Only the page itself can post (per-run token, same origin, JSON only), so
 another website open in your browser cannot slip instructions to your agents.
 
-It opens in its own Microsoft Edge app window (separate profile in
-`~/.multi-review/chat-window`, no tabs or address bar); closing the window
-stops the server. Without Edge your default browser opens and `Ctrl+C` stops
-it. `--no-open` only serves the page.
+The window is a Microsoft Edge app window (separate profile in
+`~/.multi-review/chat-window`, no tabs or address bar); closing it stops the
+panel. Without Edge your default browser opens and `Ctrl+C` stops it.
+`--no-open` only serves the page. Set `MULTI_REVIEW_NO_CHAT=1` to keep `join`
+from opening it (CI, scripts). The panel lists only sessions this machine
+knows (`~/.multi-review/`), and every request must come from `127.0.0.1` /
+`localhost` itself, so a website cannot read your reviews through it.
 
 ## FAQ
 

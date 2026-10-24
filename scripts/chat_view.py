@@ -1,22 +1,27 @@
-"""`multi_loop.py chat`: a local web page that shows a review session as a chat.
+"""`multi_loop.py chat`: one local web page for every multi-review session on this machine.
 
-Standard library only. Serves one HTML page and a JSON endpoint on 127.0.0.1;
-the page polls /api/state every 2 s. Live mode syncs the event log on each
-poll (throttled), replay mode only reads it and plays it back at chat speed.
-Nothing leaves the machine: the server binds to localhost and the page loads
+Standard library only. The page lists the sessions (running ones first, then the
+recently finished ones), shows the selected one as a chat and lets the user write
+to its agents. A running session is shown live (the page polls /api/state every
+2 s; each poll moves the event log forward, throttled), a finished one is played
+back from its event log at chat speed. Nothing leaves the machine: the server
+binds to 127.0.0.1, checks the Host header on every request, and the page loads
 no external resources.
 
-The page opens in its own Microsoft Edge app window (`--app`, separate
-profile under ~/.multi-review/chat-window). The page holds an SSE connection
-to /api/alive; once the window is closed and no page has been connected for
-WINDOW_GRACE seconds, the server stops. Without Edge the default browser
-opens instead and the server runs until Ctrl+C.
+It is a single hub: `join` starts it when a session is created and no hub runs
+yet (see ~/.multi-review/hub.json); an open page picks up new sessions by itself.
+The page opens in its own Microsoft Edge app window (`--app`, separate profile
+under ~/.multi-review/chat-window) and holds an SSE connection to /api/alive;
+once the window is closed and no page has been connected for WINDOW_GRACE
+seconds, the hub stops. Without Edge the default browser opens instead and the
+hub runs until Ctrl+C.
 """
 import hmac
 import json
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -29,9 +34,11 @@ import chat_events
 
 SYNC_EVERY = 2.0
 SAY_MAX_BYTES = 16384
-WINDOW_GRACE = 8          # seconds without a connected page before an Edge-window server stops
+PORT_TRIES = 20           # 8777, 8778, ... when the default port is taken
+WINDOW_GRACE = 8          # seconds without a connected page before an Edge-window hub stops
 ALIVE_PING = 2            # SSE keep-alive interval; a closed window is noticed on the next write
 WINDOW_PROFILE = Path.home() / ".multi-review" / "chat-window"
+APP_ID = "multi-review-chat"
 
 
 def find_edge():
@@ -54,7 +61,7 @@ def open_window(url):
     if not edge:
         return None
     WINDOW_PROFILE.mkdir(parents=True, exist_ok=True)
-    args = [edge, f"--app={url}", "--window-size=1280,820", f"--user-data-dir={WINDOW_PROFILE}",
+    args = [edge, f"--app={url}", "--window-size=1320,840", f"--user-data-dir={WINDOW_PROFILE}",
             "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"]
     try:
         return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -62,22 +69,43 @@ def open_window(url):
         return None
 
 
-def make_server(state, describe, sync, port=8777, replay=False, say=None):
-    """state: the session's .state folder; describe(): session + agents dict for the page;
-    sync(): moves the event log forward (live mode only); say(text): stores a message the user typed
-    (None = read-only page). Port 0 picks a free port."""
+class Server(ThreadingHTTPServer):
+    # Windows' SO_REUSEADDR lets a second server bind a port that is in use; then two hubs would
+    # share one port. Bind exclusively there, so a busy port fails and bind() moves to the next one.
+    allow_reuse_address = os.name != "nt"
+    daemon_threads = True  # open SSE streams must not block shutdown
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def make_server(hub, port=8777, initial=None, replay_first=False):
+    """hub: sessions() -> [{"key", ...}], and per key: state_dir(key), describe(key), sync(key),
+    say(key, text) (say may raise ValueError). Only keys that sessions() lists are ever served,
+    so a request cannot point the server at an arbitrary folder. Port 0 picks a free port."""
     token = secrets.token_urlsafe(24)  # only this page knows it: other sites cannot post to the agents
-    last_sync = [0.0]
-    sync_lock = threading.Lock()
+    last_sync, sync_lock = {}, threading.Lock()
     alive = {"clients": 0, "ever": False, "last": time.time()}
     alive_lock = threading.Lock()
+
+    def known(key):
+        return any(s["key"] == key for s in hub.sessions())
+
+    def sync_due(key):
+        with sync_lock:
+            if time.time() - last_sync.get(key, 0) < SYNC_EVERY:
+                return False
+            last_sync[key] = time.time()
+            return True
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
-        def send(self, code, body, ctype):
-            data = body.encode("utf-8")
+        def send(self, code, body, ctype="application/json; charset=utf-8"):
+            data = (body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
@@ -89,56 +117,78 @@ def make_server(state, describe, sync, port=8777, replay=False, say=None):
             self.end_headers()
             self.wfile.write(data)
 
+        def host_ok(self):
+            # DNS rebinding: a page on another domain that resolves to 127.0.0.1 still sends its own Host.
+            port = self.server.server_address[1]
+            return self.headers.get("Host") in (f"127.0.0.1:{port}", f"localhost:{port}")
+
         def do_GET(self):  # noqa: N802 - http.server API
+            if not self.host_ok():
+                return self.send(403, {"error": "forbidden"})
             url = urlparse(self.path)
+            q = parse_qs(url.query)
             if url.path == "/":
-                page = PAGE.replace("__REPLAY__", "true" if replay else "false")
-                page = page.replace("__CAN_SAY__", "true" if say and not replay else "false").replace("__TOKEN__", token)
+                page = (PAGE.replace("__TOKEN__", token)
+                        .replace("__INITIAL__", json.dumps(initial or ""))
+                        .replace("__REPLAY_FIRST__", "true" if replay_first else "false"))
                 self.send(200, page, "text/html; charset=utf-8")
+            elif url.path == "/api/ping":
+                self.send(200, {"app": APP_ID, "pid": os.getpid()})
             elif url.path == "/api/alive":
                 self.keep_alive()
+            elif url.path == "/api/sessions":
+                self.send(200, {"sessions": hub.sessions(), "now": time.time()})
             elif url.path == "/api/state":
+                key = q.get("s", [""])[0]
+                if not known(key):
+                    return self.send(404, {"error": "unknown session"})
                 try:
-                    since = max(0, int(parse_qs(url.query).get("since", ["0"])[0]))
+                    since = max(0, int(q.get("since", ["0"])[0]))
                 except ValueError:
                     since = 0
-                if not replay:
-                    with sync_lock:
-                        if time.time() - last_sync[0] >= SYNC_EVERY:
-                            last_sync[0] = time.time()
-                            sync()
+                info = hub.describe(key)
+                state = hub.state_dir(key)
+                # A running session moves its log forward; a finished one from before the log existed
+                # gets one built once from what is left (session.json, final.md, any agent files).
+                fresh_log = not (Path(state) / chat_events.EVENTS_FILE).exists()
+                if (info["session"]["active"] or fresh_log) and sync_due(key):
+                    hub.sync(key)
                 events = chat_events.read_events(state, since)
-                body = dict(describe(), events=events, next=since + len(events), replay=replay, now=time.time())
-                self.send(200, json.dumps(body, ensure_ascii=False), "application/json; charset=utf-8")
+                self.send(200, dict(info, events=events, next=since + len(events), now=time.time()))
             else:
-                self.send(404, "not found", "text/plain; charset=utf-8")
+                self.send(404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802 - http.server API
             """The message box. A message reaches AI agents as a request from the user, so only this
             page may send one: same Host and Origin (no DNS rebinding, no cross-site form), JSON body
             (forces a CORS preflight that this server never answers) and the per-run token."""
-            here = f"127.0.0.1:{self.server.server_address[1]}"
-            if urlparse(self.path).path != "/api/say" or not say or replay:
-                return self.send(404, "not found", "text/plain; charset=utf-8")
-            ok = (self.headers.get("Host") == here and self.headers.get("Origin") == f"http://{here}"
-                  and (self.headers.get("Content-Type") or "").startswith("application/json")
-                  and hmac.compare_digest(self.headers.get("X-MR-Token") or "", token))
-            if not ok:
-                return self.send(403, json.dumps({"error": "forbidden"}), "application/json; charset=utf-8")
             try:
                 size = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 size = -1
             if not 0 < size <= SAY_MAX_BYTES:
-                return self.send(413, json.dumps({"error": "message too large"}), "application/json; charset=utf-8")
+                self.close_connection = True
+                return self.send(413, {"error": "message too large"})
+            raw = self.rfile.read(size)  # read before any answer: an unread body resets the connection
+            if urlparse(self.path).path != "/api/say":
+                return self.send(404, {"error": "not found"})
+            port = self.server.server_address[1]
+            ok = (self.host_ok() and self.headers.get("Origin") in (f"http://127.0.0.1:{port}",
+                                                                     f"http://localhost:{port}")
+                  and (self.headers.get("Content-Type") or "").startswith("application/json")
+                  and hmac.compare_digest(self.headers.get("X-MR-Token") or "", token))
+            if not ok:
+                return self.send(403, {"error": "forbidden"})
             try:
-                text = json.loads(self.rfile.read(size).decode("utf-8")).get("text", "")
-                msg = say(text if isinstance(text, str) else "")
+                body = json.loads(raw.decode("utf-8"))
+                key, text = body.get("s", ""), body.get("text", "")
+                if not known(key):
+                    return self.send(404, {"error": "unknown session"})
+                msg = hub.say(key, text if isinstance(text, str) else "")
             except (ValueError, AttributeError) as e:  # bad JSON, empty, too long, session over
-                return self.send(400, json.dumps({"error": str(e)}), "application/json; charset=utf-8")
-            sync()
-            self.send(200, json.dumps({"ok": True, "message": msg}, ensure_ascii=False),
-                      "application/json; charset=utf-8")
+                return self.send(400, {"error": str(e)})
+            hub.sync(key)
+            self.send(200, {"ok": True, "message": msg})
 
         def keep_alive(self):
             """SSE stream the page keeps open; it ends when the window (or tab) is closed."""
@@ -161,8 +211,7 @@ def make_server(state, describe, sync, port=8777, replay=False, say=None):
                     alive["clients"] -= 1
                     alive["last"] = time.time()
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    server.daemon_threads = True  # open SSE streams must not block shutdown
+    server = Server(("127.0.0.1", port), Handler)
     server.alive = alive
     return server
 
@@ -173,15 +222,31 @@ def window_closed(alive, now=None):
     return alive["ever"] and alive["clients"] <= 0 and now - alive["last"] > WINDOW_GRACE
 
 
-def serve(state, describe, sync, port=8777, replay=False, open_browser=True, say=None):
-    server = make_server(state, describe, sync, port, replay, say)
+def bind(hub, port=8777, initial=None, replay_first=False):
+    """make_server on `port`, or the next free one (something else may hold it)."""
+    for attempt in range(PORT_TRIES):
+        try:
+            return make_server(hub, port + attempt if port else 0, initial, replay_first)
+        except OSError:
+            if attempt == PORT_TRIES - 1:
+                raise
+    return None
+
+
+def serve(hub, port=8777, initial=None, replay_first=False, open_browser=True, hub_file=None):
+    """Run the hub until its Edge window is closed (or Ctrl+C). hub_file records the port for `join`."""
+    server = bind(hub, port, initial, replay_first)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    if hub_file:
+        Path(hub_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(hub_file).write_text(json.dumps({"port": server.server_address[1], "pid": os.getpid()}),
+                                  encoding="utf-8")
     proc = open_window(url) if open_browser else None
     if open_browser and not proc:
         webbrowser.open(url)
     how = "Edge window; closes with it" if proc else "Ctrl+C to stop"
-    print(f"CHAT {'replay' if replay else 'live'} view: {url}  ({how})", flush=True)
+    print(f"CHAT hub: {url}  ({how})", flush=True)
     try:
         while not (proc and window_closed(server.alive)):
             time.sleep(1)
@@ -195,6 +260,12 @@ def serve(state, describe, sync, port=8777, replay=False, open_browser=True, say
                 pass
         server.shutdown()
         server.server_close()
+        if hub_file:
+            try:
+                if json.loads(Path(hub_file).read_text(encoding="utf-8")).get("pid") == os.getpid():
+                    Path(hub_file).unlink()
+            except (OSError, ValueError):
+                pass
     print("CHAT closed", flush=True)
     return url
 
@@ -204,9 +275,10 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>multi-review chat</title>
+<title>multi-review</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  [hidden] { display: none !important; }
   :root {
     color-scheme: dark;
     --ink: #0f1115; --side: #0c0e12; --panel: #151820; --panel2: #1b1f29; --line: #2a2f3a;
@@ -216,14 +288,24 @@ PAGE = r"""<!doctype html>
   }
   html, body { height: 100%; }
   body { background: var(--ink); color: var(--paper); font: 14px/1.45 var(--sans); }
-  .app { display: grid; grid-template-columns: 250px 1fr; height: 100vh; }
-  aside { background: var(--side); border-right: 1px solid var(--line); padding: 20px 16px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
-  .brand { font: 600 17px var(--mono); }
-  .brand small, .goal { display: block; font: 400 11px/1.5 var(--mono); color: var(--muted); margin-top: 4px; }
-  .goal { color: var(--text); white-space: pre-wrap; max-height: 9em; overflow: hidden; }
-  .label { font: 11px var(--mono); color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
-  .agents { display: grid; gap: 6px; }
-  .agent { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 9px; }
+  .app { display: grid; grid-template-columns: 270px 1fr; height: 100vh; }
+  aside { background: var(--side); border-right: 1px solid var(--line); padding: 18px 14px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+  aside > * { flex-shrink: 0; }  /* a long session list must not squeeze the goal to nothing */
+  .brand { font: 600 17px var(--mono); padding: 0 2px; }
+  .label { font: 11px var(--mono); color: var(--muted); letter-spacing: .08em; text-transform: uppercase; padding: 0 2px; }
+  .sessions { display: grid; gap: 4px; }
+  .sess { text-align: left; width: 100%; display: grid; gap: 2px; padding: 8px 10px; border-radius: 9px; background: transparent; border: 1px solid transparent; color: var(--paper); cursor: pointer; font: 13px var(--sans); }
+  .sess:hover { background: var(--panel); }
+  .sess.on { background: var(--panel2); border-color: var(--line); }
+  .sess b { font: 600 13px var(--mono); display: flex; align-items: center; gap: 7px; }
+  .sess b i { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
+  .sess.live b i { background: var(--ok); }
+  .sess span { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess.fresh { animation: flash 1.6s ease-out 2; }
+  .goal { font: 11px/1.5 var(--mono); color: var(--text); white-space: pre-wrap; max-height: 7.5em; overflow: hidden; padding: 0 2px; }
+  .meta { font: 11px var(--mono); color: var(--muted); padding: 0 2px; }
+  .agents { display: grid; gap: 4px; }
+  .agent { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 9px; }
   .agent.typing { background: var(--panel2); }
   .agent.left, .agent.stale { opacity: .4; }
   .av { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font: 600 11px var(--mono); color: var(--ink); flex: none; }
@@ -231,7 +313,7 @@ PAGE = r"""<!doctype html>
   .agent span { font: 11px var(--mono); color: var(--muted); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-left: auto; flex: none; }
   .agent.stale .dot { background: var(--pt); } .agent.left .dot { background: var(--line); }
-  .ring { margin-top: auto; border-top: 1px solid var(--line); padding-top: 12px; font: 11.5px/1.6 var(--mono); color: var(--muted); }
+  .ring { margin-top: auto; border-top: 1px solid var(--line); padding: 12px 2px 0; font: 11.5px/1.6 var(--mono); color: var(--muted); }
   .ring em { font-style: normal; color: var(--paper); word-break: break-word; }
   main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   header { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: space-between; align-items: center; padding: 14px 22px; border-bottom: 1px solid var(--line); font: 12.5px var(--mono); color: var(--muted); }
@@ -269,32 +351,37 @@ PAGE = r"""<!doctype html>
   .compose button { padding: 10px 16px; font-size: 13px; background: var(--ok); color: var(--ink); border: 0; font-weight: 600; }
   .compose button:disabled, .compose textarea:disabled { opacity: .5; cursor: default; }
   .compose .hint { font: 11px var(--mono); color: var(--muted); }
-  .empty { margin: auto; color: var(--muted); font: 12.5px var(--mono); text-align: center; }
+  .empty { margin: auto; color: var(--muted); font: 12.5px var(--mono); text-align: center; line-height: 1.7; }
   button { font: 12px var(--mono); color: var(--paper); background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  button:focus-visible, .sess:focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
   @keyframes in { from { opacity: 0; transform: translateY(6px); } }
   @keyframes blink { 50% { opacity: .25; } }
+  @keyframes flash { 0% { background: rgba(123,216,143,.25); } 100% { background: transparent; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
-  @media (max-width: 720px) {
+  @media (max-width: 760px) {
     .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; height: 100vh; }
-    aside { border-right: 0; border-bottom: 1px solid var(--line); flex-direction: row; flex-wrap: wrap; max-height: 40vh; }
-    .agents { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); width: 100%; }
-    .ring { margin-top: 0; width: 100%; }
-    aside .label { display: none; }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 42vh; }
+    .agents { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    .ring { margin-top: 0; }
   }
 </style>
 </head>
 <body>
 <div class="app">
   <aside>
-    <div><div class="brand">multi-review<small id="meta">loading…</small></div><span class="goal" id="goal"></span></div>
-    <div class="label">agents</div>
+    <div class="brand">multi-review</div>
+    <div class="label">sessions</div>
+    <div class="sessions" id="sessions"></div>
+    <div class="goal" id="goal"></div>
+    <div class="meta" id="meta"></div>
+    <div class="label" id="agentsLabel" hidden>agents</div>
     <div class="agents" id="agents"></div>
     <div class="ring" id="ring"></div>
   </aside>
   <main>
-    <header><span><b id="title">#review</b> &nbsp;every finding needs path:line</span><span><span class="clock" id="clock"></span> <button id="restart" hidden>replay again</button></span></header>
+    <header><span><b id="title">multi-review</b> &nbsp;every finding needs path:line</span><span><span class="clock" id="clock"></span> <button id="restart" hidden>replay again</button></span></header>
     <div class="note">Built from the agents' review files, not a transcript of what they said.</div>
-    <div class="feed" id="feed"><div class="empty" id="empty">waiting for the first event…</div></div>
+    <div class="feed" id="feed"><div class="empty" id="empty">No session yet.<br>Start one with <code>/multi-review</code>; it shows up here by itself.</div></div>
     <form class="compose" id="compose" hidden>
       <div class="col">
         <textarea id="say" rows="1" maxlength="2000" placeholder="Message the agents… (@codex to address one)" aria-label="Message the agents"></textarea>
@@ -306,13 +393,14 @@ PAGE = r"""<!doctype html>
 </div>
 <script>
 "use strict";
-const REPLAY = __REPLAY__, CAN_SAY = __CAN_SAY__, TOKEN = "__TOKEN__";
+const TOKEN = "__TOKEN__", INITIAL = __INITIAL__, REPLAY_FIRST = __REPLAY_FIRST__;
 const KNOWN = { claude: "#e8a87c", antigravity: "#8ab4f8", codex: "#c6c1b5", gemini: "#b39ddb", cursor: "#f48fb1",
                 copilot: "#90caf9", opencode: "#a5d6a7", qwen: "#7fd1c7" };
 const PALETTE = ["#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#a3be8c", "#88c0d0", "#d08770", "#b48ead"];
-let state = null, cursor = 0, queue = [], playing = false, shown = 0;
-const seenAgents = new Set();  // replay: agents that have joined so far
 const feed = document.getElementById("feed");
+let sessions = [], known = null, current = null, gen = 0;
+let state = null, cursor = 0, queue = [], playing = false, shown = 0, mode = "live";
+const seenAgents = new Set();  // replay: agents that have joined so far
 
 function color(name) {
   if (KNOWN[name]) return KNOWN[name];
@@ -333,6 +421,7 @@ function sevClass(sev) { return ["Kritik", "Yuksek"].includes(sev) ? sev : "sev"
 function badge(word, extra) { return el("span", "v " + (extra || word), word); }
 function hhmm(t) { return t ? new Date(t * 1000).toTimeString().slice(0, 5) : ""; }
 function fmt(s) { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + "h" : "") + String(m).padStart(h ? 2 : 1, "0") + "m"; }
+function ago(t) { const s = Date.now() / 1000 - t; return s < 3600 ? fmt(s) + " ago" : s < 86400 ? Math.round(s / 3600) + "h ago" : new Date(t * 1000).toLocaleDateString(); }
 
 function message(e, body) {
   const m = el("div", "msg"), b = el("div", "bubble"), who = el("div", "who", e.agent);
@@ -394,53 +483,107 @@ function typing(names) {
   const stick = atBottom(); feed.appendChild(t); if (stick) feed.scrollTop = feed.scrollHeight;
 }
 
+function sessionList(fresh) {
+  const box = document.getElementById("sessions");
+  box.replaceChildren(...sessions.map((s) => {
+    const b = el("button", "sess" + (s.active ? " live" : "") + (s.key === current ? " on" : "") + (fresh.has(s.key) ? " fresh" : ""));
+    b.type = "button";
+    const name = el("b"); name.append(el("i"), `${s.project} · ${s.session}`);
+    b.append(name, el("span", null, (s.active ? `live · ${fmt(s.end - Date.now() / 1000)} left` : "ended · " + ago(s.end)) + ` · ${s.agents} agent${s.agents === 1 ? "" : "s"}`));
+    if (s.goal) b.appendChild(el("span", null, s.goal));
+    b.title = s.root; b.onclick = () => select(s.key);
+    return b;
+  }));
+  if (!sessions.length) box.replaceChildren(el("span", "meta", "none yet"));
+}
 function sidebar(speaking) {
   const s = state.session, box = document.getElementById("agents");
-  document.getElementById("title").textContent = "#" + s.name;
+  document.getElementById("title").textContent = `${s.project} · #${s.name}`;
   document.getElementById("meta").textContent = `${s.order_mode} · ${s.work_mode} · every ${fmt(s.interval)}`;
   document.getElementById("goal").textContent = s.goal ? "goal: " + s.goal : "";
+  document.getElementById("agentsLabel").hidden = false;
   box.replaceChildren(...state.agents.map((a) => {
-    const gone = REPLAY ? !seenAgents.has(a.name) : a.left;
-    const row = el("div", "agent" + (gone ? " left" : !REPLAY && a.stale ? " stale" : "") + (speaking.includes(a.name) ? " typing" : ""));
+    const gone = mode === "replay" ? !seenAgents.has(a.name) : a.left;
+    const row = el("div", "agent" + (gone ? " left" : mode === "live" && a.stale ? " stale" : "") + (speaking.includes(a.name) ? " typing" : ""));
     const info = el("div"); info.append(el("b", null, a.name), el("span", null, (a.mode === "drive" ? "text-only · " : "") + a.file));
     row.append(avatar(a.name), info, el("div", "dot")); return row;
   }));
   const ring = document.getElementById("ring"); ring.replaceChildren(el("span", null, `RING v${s.ring_version}`), document.createElement("br"), el("em", null, s.ring));
 }
-function clock(t) {
+function clock() {
   const s = state.session, c = document.getElementById("clock");
-  if (REPLAY) c.textContent = `replay · ${shown} / ${shown + queue.length} events`;
-  else c.textContent = s.active ? `${fmt(state.now - s.start)} elapsed · ${fmt(s.end - state.now)} left` : "session over";
+  if (mode === "replay") c.textContent = `replay · ${shown} / ${shown + queue.length} events`;
+  else c.textContent = `${fmt(state.now - s.start)} elapsed · ${fmt(s.end - state.now)} left`;
 }
 
-async function poll() {
+async function loadSessions() {
   try {
-    const r = await fetch("/api/state?since=" + cursor, { cache: "no-store" });
-    state = await r.json(); cursor = state.next;
-    if (REPLAY) { queue.push(...state.events); if (!playing) play(); }
-    else { state.events.forEach((e) => push(render(e))); const live = state.agents.filter((a) => a.typing).map((a) => a.name); sidebar(live); typing(live); clock(); }
-  } catch (err) { document.getElementById("clock").textContent = "server not reachable"; }
+    const r = await fetch("/api/sessions", { cache: "no-store" });
+    const list = (await r.json()).sessions;
+    const fresh = new Set(known ? list.filter((s) => !known.has(s.key)).map((s) => s.key) : []);
+    known = new Set(list.map((s) => s.key)); sessions = list;
+    const live = list.filter((s) => s.active);
+    // A session created after the page opened is what the user just started: switch to it.
+    const started = list.find((s) => fresh.has(s.key) && s.active);
+    if (!current && list.length) select(INITIAL && known.has(INITIAL) ? INITIAL : (live[0] || list[0]).key);
+    else if (started) select(started.key);
+    else if (current && !known.has(current)) select(list[0] ? list[0].key : null);
+    sessionList(fresh);
+  } catch (err) { document.getElementById("clock").textContent = "hub not reachable"; }
+}
+function select(key) {
+  gen += 1; current = key; state = null; cursor = 0; queue = []; shown = 0; playing = false; seenAgents.clear();
+  feed.replaceChildren(); document.getElementById("restart").hidden = true;
+  document.getElementById("clock").textContent = "";
+  const s = sessions.find((x) => x.key === key);
+  mode = s && !s.active || (REPLAY_FIRST && key === INITIAL && gen === 1) ? "replay" : "live";
+  form.hidden = !(s && s.active);
+  box.disabled = sendBtn.disabled = false; box.placeholder = "Message the agents… (@codex to address one)";
+  document.getElementById("hint").textContent = "Enter sends · Shift+Enter new line · agents pick it up within ~10 s and answer in their file";
+  sessionList(new Set());
+  if (key) poll();
+}
+async function poll() {
+  if (!current) return;
+  const my = gen;
+  try {
+    const r = await fetch(`/api/state?s=${encodeURIComponent(current)}&since=${cursor}`, { cache: "no-store" });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (my !== gen) return;  // the user switched sessions meanwhile
+    state = data; cursor = data.next;
+    if (mode === "replay") { queue.push(...data.events); if (!playing) play(my); }
+    else {
+      data.events.forEach((e) => push(render(e)));
+      const live = data.agents.filter((a) => a.typing).map((a) => a.name); sidebar(live); typing(live); clock();
+      if (!data.session.active) { form.hidden = true; document.getElementById("clock").textContent = "session over"; }
+    }
+  } catch (err) { document.getElementById("clock").textContent = "hub not reachable"; }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function play() {
+async function play(my) {
   playing = true; sidebar([]);
-  while (queue.length) {
+  while (queue.length && my === gen) {
     const e = queue.shift();
     if (e.kind === "join") seenAgents.add(e.agent); else if (e.kind === "leave") seenAgents.delete(e.agent);
     if (e.kind === "ring") { state.session.ring = e.ring; state.session.ring_version = e.version; }
     const chat = !!e.agent && !["join", "leave"].includes(e.kind);
-    if (chat) { sidebar([e.agent]); typing([e.agent]); await sleep(700); typing([]); }
+    if (chat) { sidebar([e.agent]); typing([e.agent]); await sleep(700); if (my !== gen) return; typing([]); }
     shown += 1; push(render(e)); clock(); sidebar([]); await sleep(chat ? 650 : 350);
   }
-  playing = false; document.getElementById("restart").hidden = false;
+  if (my !== gen) return;
+  playing = false; clock();
+  if (!shown) { feed.replaceChildren(el("div", "empty", "No events recorded for this session.")); return; }
+  document.getElementById("restart").hidden = false;
 }
-document.getElementById("restart").onclick = () => { feed.replaceChildren(); seenAgents.clear(); shown = 0; cursor = 0; queue = []; document.getElementById("restart").hidden = true; poll(); };
+document.getElementById("restart").onclick = () => { const k = current; select(k); };
+
 const form = document.getElementById("compose"), box = document.getElementById("say"), sendBtn = document.getElementById("send");
 async function send() {
-  const text = box.value.trim(); if (!text) return;
+  const text = box.value.trim(); if (!text || !current) return;
   sendBtn.disabled = true;
   try {
-    const r = await fetch("/api/say", { method: "POST", headers: { "Content-Type": "application/json", "X-MR-Token": TOKEN }, body: JSON.stringify({ text }) });
+    const r = await fetch("/api/say", { method: "POST", headers: { "Content-Type": "application/json", "X-MR-Token": TOKEN }, body: JSON.stringify({ s: current, text }) });
     const out = await r.json();
     if (!r.ok) throw new Error(out.error || r.status);
     box.value = ""; box.style.height = "auto";
@@ -452,13 +595,10 @@ async function send() {
 form.onsubmit = (ev) => { ev.preventDefault(); send(); };
 box.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); } });
 box.addEventListener("input", () => { box.style.height = "auto"; box.style.height = Math.min(box.scrollHeight, 160) + "px"; });
-form.hidden = !CAN_SAY;
-setInterval(() => {
-  if (!state || !CAN_SAY || state.session.active) return;
-  box.disabled = sendBtn.disabled = true; box.placeholder = "The session is over.";
-}, 1000);
-poll(); if (!REPLAY) setInterval(poll, 2000);
-new EventSource("/api/alive");  // keeps the server up while this window is open
+
+loadSessions(); setInterval(loadSessions, 3000);
+setInterval(() => { if (mode === "live") poll(); }, 2000);
+new EventSource("/api/alive");  // keeps the hub up while this window is open
 </script>
 </body>
 </html>

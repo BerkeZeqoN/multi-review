@@ -36,7 +36,8 @@ ID_RE = re.compile(r"\b([A-Z][A-Z0-9]{0,3}-\d{1,4})\b")
 VERDICT_RE = re.compile(r"\b(KABUL|RED|KISMEN)\b")
 STRIKE_RE = re.compile(r"~~\s*([A-Z][A-Z0-9]{0,3}-\d{1,4})\s*~~")
 FINAL_ITEM_RE = re.compile(r"^###\s+(F-\d+)\s*(?:\[([^\]]+)\])?\s*(.*)$", re.M)
-USER_REPLY_RE = re.compile(r"^\s*[-*]\s*\**\s*(U-\d+)\s*\**\s*[:.\-—]+\s*(.+)$")
+# "- U-001: ...", "- U-001 (KABUL): ...", "- **U-001 (claude):** ...": an optional note after the id.
+USER_REPLY_RE = re.compile(r"^\s*[-*]\s*\**\s*(U-\d+)\s*\**(?:\s*\([^)]*\))?\s*\**\s*[:.\-—]+\s*\**\s*(.+)$")
 USER_FILE = "user.jsonl"  # written by multi_loop.post_user_message (the chat page's message box)
 
 
@@ -220,7 +221,7 @@ def sync(state, review, session, final_name="final.md", now=None):
                 presence[name] = state_now
         add(f"ring:{session.get('ring_version')}", {"kind": "ring", "ring": ring_text(session),
                                                     "version": session.get("ring_version")})
-        for msg in read_events(state, 0, USER_FILE):
+        for msg in read_events(state, 0, USER_FILE, skip_bad=True):
             add(f"user:{msg.get('id')}", {"kind": "user", "id": msg.get("id"), "to": msg.get("to", "all"),
                                           "text": _clean(str(msg.get("text", "")))}, msg.get("t"))
         for name, a in agents.items():
@@ -252,8 +253,9 @@ def sync(state, review, session, final_name="final.md", now=None):
         return len(new)
 
 
-def read_events(state, since=0, name=EVENTS_FILE):
-    """Lines of a .jsonl log from index `since` on; a line still being written is skipped until complete."""
+def read_events(state, since=0, name=EVENTS_FILE, skip_bad=False):
+    """Lines of a .jsonl log from index `since` on. The event log stops at a line still being written
+    (cursor stays valid); skip_bad drops a broken line instead, so one bad line hides nothing after it."""
     path = Path(state) / name
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -264,7 +266,8 @@ def read_events(state, since=0, name=EVENTS_FILE):
         try:
             out.append(json.loads(line))
         except ValueError:
-            break
+            if not skip_bad:
+                break
     return out
 
 

@@ -108,6 +108,12 @@ script prints `MULTIPLE_SESSIONS` with name, goal, path and time left per line:
 ask the user which one, then pass `--root` and `--session`. Never ask the user
 for the path when joining otherwise.
 
+**The chat panel opens by itself.** When `join` creates a session it prints
+`CHAT_PANEL opening` (a new Edge window with the live chat) or `CHAT_PANEL
+already open` (the open panel switches to the new session within seconds).
+Do nothing for it. If it prints `CHAT_PANEL could not start`, tell the user
+the command it shows. `MULTI_REVIEW_NO_CHAT=1` turns this off (CI, scripts).
+
 Then follow PROTOCOL.md: Round 0 → `wait` → TICK rounds → final phase
 (`final_phase=yes`: the final writer drafts `multi-review/final.md`) →
 SESSION_OVER → `done` (everyone else) → `finalize` (final writer: keeps only
@@ -175,10 +181,11 @@ page). Handle it as PROTOCOL.md "User messages" says, answer under
 
 ## Watching (for the user)
 
-`python SCRIPT chat` opens a live chat view (with a message box) of the session on
-`http://127.0.0.1:8777` (`--replay` plays a finished one back). Agents need
-not do anything for it; start it with Bash `run_in_background: true` only if
-the user asks.
+One panel shows every session on this machine (`http://127.0.0.1:8777`): the
+list on the left switches between them; running ones are live (with a message
+box), finished ones play back. If the user closed it and asks again, start
+`python SCRIPT chat` with Bash `run_in_background: true` (it blocks until the
+window is closed; never wait on it). A second `chat` only reports the open one.
 
 ## Ending
 

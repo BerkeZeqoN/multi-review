@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- One chat panel for every session: the list on the left switches between running sessions
+  (live, message box) and recently finished ones (replay). `join` opens it when it creates a
+  session; an open panel selects a new session by itself. `MULTI_REVIEW_NO_CHAT=1` turns it off.
+- Finished sessions from before the event log get one built from what is left when opened.
+
+### Fixed
+- Unanswered user messages are no longer lost: every TICK lists them as `PENDING_USER=...`,
+  `join --resume` shows them again.
+- Agent replies written as `- U-001 (note): ...` or `- **U-001:** ...` reach the chat.
+- One broken line in `.state/user.jsonl` no longer hides later messages or reuses an id.
+- The panel rejects requests whose Host is not `127.0.0.1`/`localhost` (DNS rebinding) and
+  accepts `localhost` for the message box too.
+- Windows: a second panel no longer binds the same port (`SO_EXCLUSIVEADDRUSE`); a taken port
+  moves to the next free one. A rejected message no longer resets the connection.
+- `stop`/`finalize` record when a session ended, so the panel shows the real end time.
+
 ## [0.6.0] - 2026-10-24
 
 ### Added

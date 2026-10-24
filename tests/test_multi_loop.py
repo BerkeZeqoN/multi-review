@@ -4,6 +4,7 @@ Run from the repo root:  python -m unittest discover -s tests -v
 """
 import contextlib
 import io
+import os
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+os.environ["MULTI_REVIEW_NO_CHAT"] = "1"  # creating a session must not open the chat window in tests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import multi_loop as m  # noqa: E402
 

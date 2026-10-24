@@ -6,15 +6,19 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
+os.environ["MULTI_REVIEW_NO_CHAT"] = "1"  # creating a session must not open the chat window in tests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import chat_events as ce  # noqa: E402
 import chat_view as cv  # noqa: E402
@@ -150,27 +154,70 @@ class Sync(unittest.TestCase):
         (m.state_dir(self.root) / ce.LOCK_FILE).write_text("")
         self.assertEqual(ce.sync(m.state_dir(self.root), m.review_dir(self.root), m.load_session(self.root)), 0)
 
-    def test_chat_server_serves_page_and_state(self):
-        self.write("claude-opus.md", AGENT_FILE)
-        server = cv.make_server(m.state_dir(self.root), lambda: m.describe(self.root),
-                                lambda: m.log_events(self.root), port=0)
+    def serve(self):
+        server = cv.make_server(m.ChatHub(), port=0)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, f"http://127.0.0.1:{server.server_address[1]}", m.session_key(self.root, "main")
+
+    def get(self, url, **headers):
         try:
-            base = f"http://127.0.0.1:{server.server_address[1]}"
-            with urllib.request.urlopen(base + "/") as r:
-                page = r.read().decode("utf-8")
-                self.assertIn("default-src 'none'", r.headers["Content-Security-Policy"])
-            self.assertIn("not a transcript", page)
-            with urllib.request.urlopen(base + "/api/state?since=0") as r:
-                state = json.loads(r.read().decode("utf-8"))
-            self.assertIn("verdict", [e["kind"] for e in state["events"]])
-            self.assertEqual(state["next"], len(state["events"]))
-            self.assertEqual({a["name"] for a in state["agents"]}, {"claude", "antigravity"})
-            with urllib.request.urlopen(base + f"/api/state?since={state['next']}") as r:
-                self.assertEqual(json.loads(r.read().decode("utf-8"))["events"], [])
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=5) as r:
+                return r.status, r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            e.close()
+            return e.code, ""
+
+    def test_hub_serves_page_sessions_and_state(self):
+        self.write("claude-opus.md", AGENT_FILE)
+        server, base, key = self.serve()
+        with urllib.request.urlopen(base + "/") as r:
+            page = r.read().decode("utf-8")
+            self.assertIn("default-src 'none'", r.headers["Content-Security-Policy"])
+        self.assertIn("not a transcript", page)
+        sessions = json.loads(self.get(base + "/api/sessions")[1])["sessions"]
+        self.assertEqual([(x["key"], x["active"], x["agents"]) for x in sessions], [(key, True, 2)])
+        q = urllib.parse.quote(key)
+        state = json.loads(self.get(f"{base}/api/state?s={q}&since=0")[1])
+        self.assertIn("verdict", [e["kind"] for e in state["events"]])
+        self.assertEqual(state["next"], len(state["events"]))
+        self.assertEqual({a["name"] for a in state["agents"]}, {"claude", "antigravity"})
+        self.assertEqual(state["session"]["project"], "proj")
+        self.assertEqual(json.loads(self.get(f"{base}/api/state?s={q}&since={state['next']}")[1])["events"], [])
+
+    def test_hub_serves_only_listed_sessions(self):
+        other = self.tmp / "other"  # a real session folder, but never registered: must stay unreadable
+        other.mkdir()
+        _, base, _ = self.serve()
+        for key in (f"{other}|main", f"{self.root}|nope", "..|main", ""):
+            self.assertEqual(self.get(f"{base}/api/state?s={urllib.parse.quote(key)}")[0], 404, key)
+
+    def test_hub_rejects_foreign_host(self):  # DNS rebinding: evil.example -> 127.0.0.1
+        _, base, key = self.serve()
+        for path in ("/", "/api/sessions", f"/api/state?s={urllib.parse.quote(key)}"):
+            self.assertEqual(self.get(base + path, Host="evil.example")[0], 403, path)
+
+    def test_named_sessions_and_real_end_time(self):
+        m.set_session("docs")
+        try:
+            quiet(m.do_join, self.root, "codex", "5m", "1h", order_mode="random")
+            quiet(m.cmd_stop, argparse.Namespace(root=self.root))
         finally:
-            server.shutdown()
-            server.server_close()
+            m.set_session("main")
+        listed = {x["session"]: x for x in m.ChatHub().sessions()}
+        self.assertEqual(set(listed), {"main", "docs"})
+        self.assertFalse(listed["docs"]["active"])
+        self.assertLessEqual(listed["docs"]["end"], time.time())  # stopped early: not the planned end
+
+    def test_finished_and_new_sessions_are_listed(self):
+        quiet(m.cmd_stop, argparse.Namespace(root=self.root))
+        second = self.tmp / "second"
+        second.mkdir()
+        m.set_session("main")
+        quiet(m.do_join, str(second), "codex", "5m", "1h", order_mode="random")
+        listed = m.ChatHub().sessions()
+        self.assertEqual([(Path(x["root"]).name, x["active"]) for x in listed], [("second", True), ("proj", False)])
 
 
 class UserMessages(Sync):
@@ -218,6 +265,31 @@ class UserMessages(Sync):
         self.assertEqual((reply[0]["agent"], reply[0]["id"]), ("claude", "U-001"))
         self.assertTrue(reply[0]["text"].startswith("yes"))
 
+    def test_reply_formats(self):  # A-001
+        for line in ("- U-001: done", "- U-001 (KABUL): done", "- **U-001 (claude):** done", "* U-001 - done"):
+            self.assertEqual(ce.parse_agent_file(f"## Kullaniciya cevap\n{line}\n", "CL")["reply:U-001"]["text"],
+                             "done", line)
+
+    def test_broken_line_hides_nothing_and_ids_stay_unique(self):  # CL-003
+        m.post_user_message(self.root, "first")
+        with open(m.state_dir(self.root) / ce.USER_FILE, "a", encoding="utf-8") as fh:
+            fh.write('{"id": "U-0\n')  # a write cut in half
+        m.post_user_message(self.root, "second")
+        self.assertEqual([x["id"] for x in m.user_messages(self.root)], ["U-001", "U-002"])
+
+    def test_unanswered_messages_come_back(self):  # CL-002
+        m.post_user_message(self.root, "one")
+        m.post_user_message(self.root, "two")
+        m.take_user_messages(self.root, "claude")  # shown once, then the agent lost its context
+        self.write("claude-opus.md", "## Kullaniciya cevap\n- U-001: answered\n")
+        session = m.load_session(self.root)
+        self.assertEqual([x["id"] for x in m.unanswered(self.root, session, "claude")], ["U-002"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            m.do_join(self.root, "claude", resume=True)
+        self.assertIn("U-002 to=all: two", out.getvalue())
+        self.assertNotIn("U-001 to=all", out.getvalue())
+
     def test_template_has_the_reply_section(self):
         text = (m.review_dir(self.root) / "claude-opus.md").read_text(encoding="utf-8")
         self.assertIn("## Kullaniciya cevap", text)
@@ -236,40 +308,38 @@ class UserMessages(Sync):
             return e.code
 
     def test_say_endpoint_needs_this_page(self):
-        server = cv.make_server(m.state_dir(self.root), lambda: m.describe(self.root), lambda: m.log_events(self.root),
-                                port=0, say=lambda text: m.post_user_message(self.root, text))
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/") as r:
-                page = r.read().decode("utf-8")
-            token = page.split('TOKEN = "')[1].split('"')[0]
-            self.assertIn("CAN_SAY = true", page)
-            self.assertEqual(self.post(server, {"text": "x"}), 403)                                   # no token
-            self.assertEqual(self.post(server, {"text": "x"}, **{"X-MR-Token": "guess"}), 403)        # wrong token
-            self.assertEqual(self.post(server, {"text": "x"}, Origin="http://evil.example",
-                                       **{"X-MR-Token": token}), 403)                                 # other site
-            self.assertEqual(self.post(server, {"text": "x"}, **{"X-MR-Token": token,
-                                                                 "Content-Type": "text/plain"}), 403)  # simple POST
-            self.assertEqual(m.user_messages(self.root), [])
-            self.assertEqual(self.post(server, {"text": "  "}, **{"X-MR-Token": token}), 400)
-            self.assertEqual(self.post(server, {"text": "@claude look at install.py"}, **{"X-MR-Token": token}), 200)
-            self.assertEqual(m.user_messages(self.root)[0]["to"], "claude")
-            self.assertIn("user", [e["kind"] for e in self.events()])
-        finally:
-            server.shutdown()
-            server.server_close()
+        server, base, key = self.serve()
+        with urllib.request.urlopen(base + "/") as r:
+            page = r.read().decode("utf-8")
+        token = page.split('TOKEN = "')[1].split('"')[0]
+        msg = {"s": key, "text": "x"}
+        self.assertEqual(self.post(server, msg), 403)                                     # no token
+        self.assertEqual(self.post(server, msg, **{"X-MR-Token": "guess"}), 403)          # wrong token
+        self.assertEqual(self.post(server, msg, Origin="http://evil.example", **{"X-MR-Token": token}), 403)
+        self.assertEqual(self.post(server, msg, **{"X-MR-Token": token, "Content-Type": "text/plain"}), 403)
+        self.assertEqual(self.post(server, {"s": "nope|main", "text": "x"}, **{"X-MR-Token": token}), 404)
+        self.assertEqual(m.user_messages(self.root), [])
+        self.assertEqual(self.post(server, {"s": key, "text": "  "}, **{"X-MR-Token": token}), 400)
+        self.assertEqual(self.post(server, {"s": key, "text": "@claude look at install.py"},
+                                   **{"X-MR-Token": token}), 200)
+        self.assertEqual(m.user_messages(self.root)[0]["to"], "claude")
+        self.assertIn("user", [e["kind"] for e in self.events()])
 
-    def test_replay_page_is_read_only(self):
-        server = cv.make_server(m.state_dir(self.root), lambda: m.describe(self.root), lambda: None, port=0,
-                                replay=True, say=lambda text: m.post_user_message(self.root, text))
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/") as r:
-                self.assertIn("CAN_SAY = false", r.read().decode("utf-8"))
-            self.assertEqual(self.post(server, {"text": "x"}, **{"X-MR-Token": "x"}), 404)
-        finally:
-            server.shutdown()
-            server.server_close()
+    def test_finished_session_takes_no_messages_from_the_page(self):
+        server, base, key = self.serve()
+        with urllib.request.urlopen(base + "/") as r:
+            token = r.read().decode("utf-8").split('TOKEN = "')[1].split('"')[0]
+        quiet(m.cmd_stop, argparse.Namespace(root=self.root))
+        self.assertEqual(self.post(server, {"s": key, "text": "hi"}, **{"X-MR-Token": token}), 400)
+
+    def test_join_does_not_open_a_window_in_tests(self):
+        self.assertFalse(m.AUTO_CHAT)
+        self.assertIsNone(m.hub_running())
+
+
+class EmptyHub:
+    def sessions(self):
+        return []
 
 
 class Window(unittest.TestCase):
@@ -280,8 +350,18 @@ class Window(unittest.TestCase):
         self.assertFalse(cv.window_closed({"clients": 0, "ever": True, "last": now - 2}, now))  # reload gap
         self.assertTrue(cv.window_closed({"clients": 0, "ever": True, "last": now - cv.WINDOW_GRACE - 1}, now))
 
+    def test_busy_port_moves_to_the_next(self):
+        first = cv.make_server(EmptyHub(), port=0)
+        busy = first.server_address[1]
+        try:
+            second = cv.bind(EmptyHub(), port=busy)
+            self.assertNotEqual(second.server_address[1], busy)
+            second.server_close()
+        finally:
+            first.server_close()
+
     def test_alive_stream_counts_the_page(self):
-        server = cv.make_server(tempfile.mkdtemp(), lambda: {}, lambda: None, port=0)
+        server = cv.make_server(EmptyHub(), port=0)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             r = urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/alive", timeout=5)
