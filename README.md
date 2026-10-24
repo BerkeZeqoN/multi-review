@@ -28,9 +28,9 @@ WORK_MODE=research YOUR_TASK=research+review
 One agent reviewing code misses things, and when it is wrong it rarely
 notices. Here every finding is checked by a second agent that has to
 reproduce it (`RED` without evidence, `KABUL` with it). Wrong line numbers,
-invented APIs and inflated severities get caught. In the sessions that built
-this repo, other agents rejected or corrected about a third of the findings
-before anything was fixed.
+invented APIs and inflated severities get caught. In the two archived sessions
+that built this repo, other agents marked about 1 in 6 verdicts as partly wrong
+or rejected (`KISMEN`/`RED`) before anything was fixed.
 
 ## Quick start
 
@@ -150,6 +150,10 @@ with that name would inject other agents' text as instructions. Pick
 
 **`WORK_WARNING`?** You added no finding for two ticks in a mode where you
 must research. Research, or log what you checked and why it is clean.
+
+**`ERROR: cannot write ...: permission denied` (Codex)?** The agent's sandbox
+blocks the project folder. Start Codex in the project folder, or let it run
+`join`/`wait` outside the sandbox. Older versions reported this as `lock busy`.
 
 **`WAITING_FOR: codex` on finalize?** That agent never ran `done`. Run
 `finalize` again, or `--force` once you are sure it is gone.

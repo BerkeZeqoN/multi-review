@@ -127,6 +127,13 @@ and exempt from the "skip commands that take >30s" rule.
 commands time out, use `wait --agent NAME --max-wait 9m` and re-run on
 `CONTINUE_WAIT`.
 
+**Codex (sandbox):** every command writes to `<ROOT>/multi-review/` (and the
+creator also to `~/.multi-review/`). Codex only writes inside its workspace, so
+start Codex in the project folder (`ROOT=`). If `ROOT` is elsewhere, run
+`join` and every `wait` with sandbox escalation / outside the sandbox
+(approve it once for the whole loop). `ERROR: cannot write ...: permission
+denied` means exactly this; it is not a busy lock, do not retry blindly.
+
 **Text-only models (no tools):** they cannot loop themselves. Run the driver;
 it joins, builds a prompt each round (protocol + project tree + key files +
 its review/answer files + code at every cited `path:line`), pipes it to the

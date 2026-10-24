@@ -6,9 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-24
+
 ### Fixed
 - `STALE_AGENTS` also lists drive agents whose driver stopped.
 - `status` and `roster` print a `NEXT:` line with the selected `--root`/`--session`.
+- A sandbox that refuses writes (Codex outside its workspace) is reported at once as
+  `ERROR: cannot write ...: permission denied` with the fix, instead of `lock busy`
+  after 15 s. Any other refused write ends with the same hint instead of a traceback.
 
 ## [0.4.0] - 2026-10-23
 
@@ -83,7 +88,8 @@ All notable changes to this project are documented here. The format follows
 - First public version: N-agent review ring, shared clock, random or
   negotiated ring order, `drive` for text-only models.
 
-[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/BerkeZeqoN/multi-review/releases/tag/v0.1.0

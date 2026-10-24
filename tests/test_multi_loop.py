@@ -453,6 +453,49 @@ class Liveness(TempProject):
         self.assertIsNotNone(seen)
 
 
+class Sandbox(TempProject):
+    def test_denied_write_is_not_reported_as_busy_lock(self):
+        # A Codex sandbox refused every write and join waited 15 s for "lock busy".
+        import time
+        import unittest.mock as mock
+        self.create()
+        real_open = m.os.open
+
+        def deny(path, *a, **kw):
+            if str(path).endswith(".lock"):
+                raise PermissionError(13, "Access is denied", str(path))
+            return real_open(path, *a, **kw)
+
+        start = time.time()
+        with mock.patch.object(m.os, "open", deny), mock.patch.object(m, "dir_writable", return_value=False):
+            with self.assertRaises(SystemExit) as cm:
+                self.join("codex")
+        self.assertIn("permission denied", str(cm.exception))
+        self.assertIn("Codex", str(cm.exception))
+        self.assertLess(time.time() - start, 5)
+
+    def test_delete_pending_lock_still_retries(self):
+        # Windows "delete pending": only the lock name is refused; the folder is writable, so wait.
+        import unittest.mock as mock
+        self.create()
+        real_open = m.os.open
+        calls = {"n": 0}
+
+        def pending_once(path, *a, **kw):
+            if str(path).endswith(".lock") and calls["n"] == 0:
+                calls["n"] += 1
+                raise PermissionError(13, "Access is denied", str(path))
+            return real_open(path, *a, **kw)
+
+        with mock.patch.object(m.os, "open", pending_once):
+            self.join("codex")
+        self.assertIn("codex", m.active_agents(m.load_session(str(self.root))))
+
+    def test_dir_writable(self):
+        self.assertTrue(m.dir_writable(self.root))
+        self.assertEqual(list(self.root.glob(".write-probe-*")), [])
+
+
 class Final(TempProject):
     def args(self, agent, **kw):
         base = {"root": str(self.root), "agent": agent, "wait": "1s", "archive": False, "force": False}

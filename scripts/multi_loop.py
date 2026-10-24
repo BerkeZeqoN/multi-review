@@ -29,7 +29,7 @@ Commands (run from the project root, or pass --root):
           model: each round pipes a prompt into CMD (stdin) and writes the
           returned markdown into the agent's own file
 """
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import argparse
 import json
@@ -276,6 +276,26 @@ def active_agents(session):
     return {n: a for n, a in session.get("agents", {}).items() if not a.get("left")}
 
 
+def dir_writable(path):
+    probe = Path(path) / f".write-probe-{os.getpid()}-{time.time_ns()}"
+    try:
+        probe.write_bytes(b"")
+    except PermissionError:
+        return False
+    try:
+        probe.unlink()
+    except OSError:
+        pass
+    return True
+
+
+def write_denied_msg(path):
+    return (f"ERROR: cannot write {path}: permission denied. The agent's sandbox most likely blocks this "
+            "folder (this is not a busy lock). Codex: start Codex with the project folder as its workspace, "
+            "or approve running this command outside the sandbox (also every later 'wait'). "
+            "Other tools: allow writes to the project's multi-review/ folder and ~/.multi-review/.")
+
+
 class Lock:
     """Cross-process lock so two agents joining at once don't clobber session.json."""
 
@@ -299,7 +319,10 @@ class Lock:
                 except PermissionError:
                     pass  # Windows: the lock is being deleted ("delete pending"); retry below
             except PermissionError:
-                pass  # Windows: create refused while the previous lock is still being deleted
+                # Windows: create refused while the previous lock is still being deleted.
+                # A sandbox (Codex, ...) refuses every write instead: probe with another name.
+                if not dir_writable(self.path.parent):
+                    sys.exit(write_denied_msg(self.path.parent))
             if time.time() > deadline:
                 sys.exit(f"ERROR: lock busy: {self.path}")
             time.sleep(0.2)
@@ -1366,4 +1389,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except PermissionError as e:
+        # Any write the sandbox refuses outside the lock (mkdir, seen.json, ...): same hint, no traceback.
+        sys.exit(write_denied_msg(Path(e.filename).parent if e.filename else "the project folder"))
