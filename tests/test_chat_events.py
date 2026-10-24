@@ -232,6 +232,66 @@ class Sync(unittest.TestCase):
         self.assertEqual([(Path(x["root"]).name, x["active"]) for x in listed], [("second", True), ("proj", False)])
 
 
+class SilentAgents(Sync):
+    """30 minutes without `wait`: out of tokens or disconnected -> dropped from the session."""
+
+    def silence(self, agent):
+        old = time.time() - m.DROP_AFTER - 60
+        session = m.load_session(self.root)
+        session["agents"][agent]["joined"] = old
+        m.save_json(m.session_path(self.root), session)
+        m.save_json(m.state_dir(self.root) / f"agent_{agent}.seen.json", {"seen": old})
+        snap = m.state_dir(self.root) / f"agent_{agent}.json"
+        if snap.exists():
+            os.utime(snap, (old, old))
+
+    def test_quiet_agent_is_kept(self):
+        self.assertEqual(m.drop_silent_agents(self.root), [])
+
+    def test_silent_agent_is_dropped_and_the_ring_closes(self):
+        quiet(m.do_join, self.root, "codex")
+        self.silence("antigravity")
+        self.assertEqual(m.drop_silent_agents(self.root), ["antigravity"])
+        session = m.load_session(self.root)
+        self.assertEqual(session["agents"]["antigravity"]["left_reason"], "silent")
+        self.assertEqual(sorted(m.ring_members(session)), ["claude", "codex"])
+        self.assertEqual(m.drop_silent_agents(self.root), [])  # once
+        leave = [e for e in self.events() if e["kind"] == "leave"]
+        self.assertEqual((leave[0]["agent"], leave[0]["reason"]), ("antigravity", "silent"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            m.cmd_roster(argparse.Namespace(root=self.root))
+        self.assertIn("[DROPPED]", out.getvalue())
+
+    def test_finalize_does_not_wait_for_a_dropped_agent(self):
+        quiet(m.cmd_stop, argparse.Namespace(root=self.root))
+        self.write("final.md", "# final\n## Duzeltilecekler\n### F-001 [Dusuk] x\n")
+        self.silence("antigravity")
+        began = time.time()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            m.cmd_finalize(argparse.Namespace(root=self.root, agent="claude", force=False, archive=True, wait="2m"))
+        self.assertLess(time.time() - began, 10)
+        self.assertIn("DROPPED=antigravity", out.getvalue())
+        self.assertIn("FINALIZED", out.getvalue())
+
+    def test_dropped_agent_can_come_back(self):
+        self.silence("antigravity")
+        m.drop_silent_agents(self.root)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            m.do_join(self.root, "antigravity")
+        self.assertIn("REJOINED", out.getvalue())
+        self.assertFalse(m.load_session(self.root)["agents"]["antigravity"]["left"])
+
+    def test_panel_marks_the_dropped_agent(self):
+        self.silence("antigravity")
+        m.drop_silent_agents(self.root)
+        agents = {a["name"]: a for a in hub.describe(self.root)["agents"]}
+        self.assertTrue(agents["antigravity"]["dropped"])
+        self.assertFalse(agents["claude"]["dropped"])
+
+
 class UserMessages(Sync):
     """The chat page's message box: stored, addressed, delivered by `wait`, answered in the agent file."""
 

@@ -6,7 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-24
+
 ### Added
+- An agent without a `wait` for 30 minutes is dropped (out of tokens or disconnected): the ring
+  closes, it cannot be the final writer, `finalize` no longer waits for it; `join` brings it back.
+  `wait`/`roster`/`finalize` print `DROPPED=...`, the chat shows why it left.
 - One chat panel for every session: the list on the left switches between running sessions
   (live, message box) and recently finished ones (replay). `join` opens it when it creates a
   session; an open panel selects a new session by itself. `MULTI_REVIEW_NO_CHAT=1` turns it off.
@@ -132,7 +137,8 @@ All notable changes to this project are documented here. The format follows
 - First public version: N-agent review ring, shared clock, random or
   negotiated ring order, `drive` for text-only models.
 
-[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/BerkeZeqoN/multi-review/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.0...v0.4.1

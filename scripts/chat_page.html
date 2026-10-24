@@ -165,7 +165,7 @@ function render(e) {
   switch (e.kind) {
     case "session": return el("div", "sys", `session created · ${e.order_mode} ring · ${e.work_mode}` + (e.goal ? " · goal set" : ""));
     case "join": return el("div", "sys", `${e.agent} joined · ${e.file}` + (e.mode === "drive" ? " · text-only model" : ""));
-    case "leave": return el("div", "sys", `${e.agent} left`);
+    case "leave": return el("div", "sys", e.reason === "silent" ? `${e.agent} dropped · no answer for 30 min (out of tokens or disconnected)` : `${e.agent} left`);
     case "ring": return el("div", "sys", `ring v${e.version}: ${e.ring}`);
     case "final_phase": return el("div", "sys", "final phase · the final writer drafts final.md");
     case "stopped": return el("div", "sys", "session over");
@@ -238,7 +238,7 @@ function sidebar(speaking) {
   box.replaceChildren(...state.agents.map((a) => {
     const gone = mode === "replay" ? !seenAgents.has(a.name) : a.left;
     const row = el("div", "agent" + (gone ? " left" : mode === "live" && a.stale ? " stale" : "") + (speaking.includes(a.name) ? " typing" : ""));
-    const info = el("div"); info.append(el("b", null, a.name), el("span", null, (a.mode === "drive" ? "text-only · " : "") + a.file));
+    const info = el("div"); info.append(el("b", null, a.name), el("span", null, (mode === "live" && a.dropped ? "dropped (30 min silent) · " : "") + (a.mode === "drive" ? "text-only · " : "") + a.file));
     row.append(avatar(a.name), info, el("div", "dot")); return row;
   }));
   const ring = document.getElementById("ring"); ring.replaceChildren(el("span", null, `RING v${s.ring_version}`), document.createElement("br"), el("em", null, s.ring));

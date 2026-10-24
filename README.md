@@ -181,6 +181,11 @@ knows (`~/.multi-review/`), and every request must come from `127.0.0.1` /
 
 ## FAQ
 
+**An agent stopped answering?** After 3 intervals without a `wait` it shows as
+`STALE`. After 30 minutes it is treated as out of tokens or disconnected:
+dropped from the ring, never the final writer, and `finalize` stops waiting
+for it. `join` brings it back.
+
 **Can several reviews run at once?** Yes. Name them: `--session security`,
 `--session docs`, in one project or many. Each lives in `multi-review/<name>/`
 with its own `final.md`. Every `join`/`wait` prints a `NEXT:` command with the

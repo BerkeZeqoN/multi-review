@@ -28,7 +28,7 @@ def describe(root):
         f = ml.review_dir(root) / a["file"]
         mtime = f.stat().st_mtime if f.exists() else 0
         agents.append({"name": name, "file": a["file"], "prefix": a["prefix"], "mode": a.get("mode", "agent"),
-                       "left": bool(a.get("left")),
+                       "left": bool(a.get("left")), "dropped": a.get("left_reason") == "silent",
                        "stale": bool(session) and ml.is_active(session, now) and ml.is_stale(root, session, name, now),
                        "typing": ml.is_active(session, now) and not a.get("left") and now - mtime < TYPING_WINDOW})
     return {"session": {"name": ml.current_session(), "project": Path(root).resolve().name,
@@ -217,6 +217,6 @@ def cmd_chat(args):
     initial = session_key(args.root, ml.current_session()) if ml.peek_session(args.root, ml.current_session()) else None
     if initial:
         ml.log_events(args.root)
-        remember_session(args.root)  # sessions from before 0.7.0 are not in recent.json yet
+        remember_session(args.root)  # sessions from before 0.6.1 are not in recent.json yet
     chat_view.serve(ChatHub(), port=args.port, initial=initial, replay_first=args.replay,
                     open_browser=not args.no_open, hub_file=None if args.no_open else hub_path())

@@ -205,7 +205,8 @@ def _roster_events(batch, session, presence):
         now_in = "left" if a.get("left") else "in"
         before = presence.get(name)
         if before == "in" and now_in == "left":
-            batch.add(f"leave:{name}:{len(batch.known)}", {"kind": "leave", "agent": name})
+            batch.add(f"leave:{name}:{len(batch.known)}", {"kind": "leave", "agent": name,
+                                                           "reason": a.get("left_reason")})
         elif before == "left" and now_in == "in":
             batch.add(f"rejoin:{name}:{len(batch.known)}", dict(_agent_fields(a), kind="join", agent=name))
         presence[name] = now_in

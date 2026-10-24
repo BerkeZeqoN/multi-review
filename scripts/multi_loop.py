@@ -31,7 +31,7 @@ Commands (run from the project root, or pass --root):
           model: each round pipes a prompt into CMD (stdin) and writes the
           returned markdown into the agent's own file
 """
-__version__ = "0.7.0"
+__version__ = "0.6.1"
 
 import argparse
 import contextlib
@@ -649,6 +649,48 @@ def is_stale(root, session, agent, now=None):
     return now - last_seen(root, session, agent) > max(3 * session["interval"], 300)
 
 
+DROP_AFTER = 30 * 60  # seconds without any `wait`: the agent ran out of tokens or its chat was closed
+
+
+def remove_from_ring(session, agent, reason, now=None):
+    """Take an agent out (caller holds the lock). The ring closes the gap without reshuffling: the
+    leaver's reviewer now reviews the leaver's target. Returns a note for the agents, or None."""
+    info = session["agents"][agent]
+    info.update(left=True, left_reason=reason, left_at=now or time.time())
+    set_ring(session, ring_members(session), f"{agent} {'dropped (silent)' if reason == 'silent' else 'left'}")
+    if session.get("negotiation") and len(active_agents(session)) < 3:
+        session["negotiation"] = None  # 2 agents have a single possible ring
+    elif session.get("negotiation") and not valid_proposals(session):
+        return "NOTE: every vote listed the leaver and is now void; agents must propose again"
+    return None
+
+
+def drop_silent_agents(root):
+    """An agent without a `wait` for DROP_AFTER is gone: out of tokens, or its chat was closed. It
+    leaves the ring and finalize stops waiting for it; `join` brings it back (REJOINED)."""
+    session = load_session(root)
+    if not session or session.get("finalized"):
+        return []
+    now = time.time()
+    if not [n for n in active_agents(session) if now - last_seen(root, session, n) > DROP_AFTER]:
+        return []
+    with Lock(root):
+        session = load_session(root)
+        silent = [n for n in active_agents(session) if now - last_seen(root, session, n) > DROP_AFTER]
+        for name in silent:
+            remove_from_ring(session, name, "silent", now)
+        if silent:
+            save_json(session_path(root), session)
+    if silent:
+        log_events(root)
+    return silent
+
+
+def dropped_line(names):
+    return (f"DROPPED={','.join(names)} (no wait for {DROP_AFTER // 60}m: out of tokens or disconnected; "
+            "removed from the ring, finalize no longer waits; `join` brings it back)")
+
+
 def stale_agents(root, session):
     # Drive agents wait through their driver, so a dead driver is just as stale (CO-005).
     return [n for n in active_agents(session) if is_stale(root, session, n)]
@@ -661,7 +703,7 @@ def print_roster(root, session, me=None):
     for name, a in session.get("agents", {}).items():
         flags = []
         if a.get("left"):
-            flags.append("LEFT")
+            flags.append("DROPPED" if a.get("left_reason") == "silent" else "LEFT")
         elif is_active(session) and is_stale(root, session, name, now):
             flags.append("STALE")
         if name == me:
@@ -891,8 +933,9 @@ def wait_for_tick(root, agent, max_wait=None):
             log_events(root)
             return "SESSION_OVER", over_line(load_session(root))
         settle_if_due(root)
-        session = load_session(root)
         touch_seen(root, agent)
+        dropped = drop_silent_agents(root)  # before the snapshot, so the closed ring is what we report
+        session = load_session(root)
         roles, ring_changed, prev_roles = snapshot(root, session, agent)
         log_events(root)
         line = (f"TICK {current_tick(session)} review={roles['review'][0]} review_changed={roles['review'][1]} "
@@ -903,6 +946,8 @@ def wait_for_tick(root, agent, max_wait=None):
                      if n and n in session["agents"]}
             line += f" previous_review={files.get('review', '-')} previous_answer={files.get('answer', '-')}"
         line += work_check(root, session, agent)
+        if dropped:
+            line += " " + dropped_line(dropped)
         pending = unanswered(root, session, agent)
         if pending:
             line += f" PENDING_USER={','.join(m['id'] for m in pending)}"
@@ -980,6 +1025,9 @@ def cmd_shuffle(args):
 
 
 def cmd_roster(args):
+    dropped = drop_silent_agents(args.root)
+    if dropped:
+        print(dropped_line(dropped))
     session = load_session(args.root)
     if not session:
         print("NO_SESSION")
@@ -1004,13 +1052,9 @@ def cmd_leave(args):
         if not is_active(session) or args.agent not in active_agents(session):
             print("NOT_IN_SESSION")
             return
-        session["agents"][args.agent]["left"] = True
-        # Close the gap without reshuffling: the leaver's reviewer now reviews the leaver's target.
-        set_ring(session, ring_members(session), f"{args.agent} left")
-        if session.get("negotiation") and len(active_agents(session)) < 3:
-            session["negotiation"] = None  # 2 agents have a single possible ring
-        elif session.get("negotiation") and not valid_proposals(session):
-            print("NOTE: every vote listed the leaver and is now void; agents must propose again")
+        note = remove_from_ring(session, args.agent, "leave")
+        if note:
+            print(note)
         save_json(session_path(args.root), session)
     log_events(args.root)
     print(f"LEFT {args.agent}")
@@ -1075,9 +1119,13 @@ def check_final(path):
 def cmd_finalize(args):
     """Wait until every agent is done, check final.md, then remove (or archive) all other md files."""
     root = args.root
-    session = load_session(root)
-    if not session:
+    if not load_session(root):
         sys.exit("NO_SESSION")
+    # A silent agent may be the earliest one, i.e. the writer: drop it first, then pick the writer.
+    dropped = drop_silent_agents(root)
+    if dropped:
+        print(dropped_line(dropped))
+    session = load_session(root)
     writer = final_writer(session)
     if args.agent != writer and not args.force:
         sys.exit(f"ERROR: the final writer is '{writer}'; only it runs finalize (or pass --force)")
@@ -1089,6 +1137,9 @@ def cmd_finalize(args):
         sys.exit(f"ERROR: {problem}. Write it first (format: PROTOCOL.md, 'final.md').")
     deadline = time.time() + parse_duration(args.wait)
     while not args.force:
+        dropped = drop_silent_agents(root)
+        if dropped:
+            print(dropped_line(dropped))
         pending = pending_agents(load_session(root))
         if not pending:
             break

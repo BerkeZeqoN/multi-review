@@ -83,6 +83,13 @@ No `wait` for 3 intervals (min 5 min) marks it `[STALE]` and prints
 `STALE_AGENTS=...`: its loop has most likely stopped. Tell the user so they
 can restart that agent; `finalize` names stale agents in `WAITING_FOR`.
 
+No `wait` for **30 minutes**: the agent is treated as gone (out of tokens, or
+its chat was closed). The next `wait`, `roster` or `finalize` of anyone drops
+it: `DROPPED=<name>` is printed, the ring closes the gap (its reviewer takes
+over its target), it is no longer the final writer and `finalize` does not
+wait for its `done`. Its open findings stay in its file; whoever reviews it
+next carries them over. If it comes back, plain `join` re-adds it (REJOINED).
+
 It also prints `RING vN`, `YOUR_ROLE: review=... answer=...`, and in negotiated
 mode `order_status=SETTLED | NEGOTIATING proposals=... waiting_for=... deadline_tick=N`.
 
