@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-24
+
 ### Added
 - `chat`: a live chat view of the session on `http://127.0.0.1:8777` (standard library web
   server, localhost only, no external resources) in its own Edge app window that stops the server
@@ -14,6 +16,12 @@ All notable changes to this project are documented here. The format follows
   appends new findings, verdicts, answers and withdrawals parsed from the agent files.
   `finalize` keeps it; a new session archives the old one. A broken log never stops a review.
 - `install.py` also copies `scripts/chat_events.py` and `scripts/chat_view.py`.
+
+### Changed
+- README opens with `docs/agents-chat.gif`: the chat view replaying the real three-agent session
+  (claude, antigravity, codex) that built this repo. The real `wait` output stays in a
+  collapsible block.
+- README explains the verdict words: `KABUL` (accept), `RED` (reject), `KISMEN` (partly right).
 
 ## [0.4.1] - 2026-10-24
 
@@ -97,7 +105,8 @@ All notable changes to this project are documented here. The format follows
 - First public version: N-agent review ring, shared clock, random or
   negotiated ring order, `drive` for text-only models.
 
-[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.1.0...v0.3.0

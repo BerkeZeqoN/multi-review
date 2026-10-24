@@ -31,7 +31,7 @@ Commands (run from the project root, or pass --root):
           model: each round pipes a prompt into CMD (stdin) and writes the
           returned markdown into the agent's own file
 """
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 import argparse
 import json
