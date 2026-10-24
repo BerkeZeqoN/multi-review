@@ -210,6 +210,17 @@ class Sync(unittest.TestCase):
         self.assertFalse(listed["docs"]["active"])
         self.assertLessEqual(listed["docs"]["end"], time.time())  # stopped early: not the planned end
 
+    def test_main_session_found_on_disk(self):  # A-003: only a named session was ever recorded
+        m.set_session("docs")
+        try:
+            quiet(m.do_join, self.root, "codex", "5m", "1h", order_mode="random")
+        finally:
+            m.set_session("main")
+        m.save_json(m.recent_path(), [{"root": self.root, "session": "docs", "created": 0}])
+        quiet(m.cmd_stop, argparse.Namespace(root=self.root))
+        m.registry_prune()
+        self.assertIn("main", {x["session"] for x in m.ChatHub().sessions()})
+
     def test_finished_and_new_sessions_are_listed(self):
         quiet(m.cmd_stop, argparse.Namespace(root=self.root))
         second = self.tmp / "second"

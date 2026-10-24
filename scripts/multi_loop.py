@@ -1219,7 +1219,9 @@ class ChatHub:
         seen, out, now = set(), [], time.time()
         entries = list(registry_active()) + list(reversed(recent))
         for root in {str(Path(e["root"]).resolve()) for e in entries}:
-            # Named sessions of a known project, also ones created before recent.json existed.
+            # Every session of a known project (main + named), also ones created before recent.json existed.
+            if (Path(root) / DIR_NAME / STATE_DIR / "session.json").is_file():
+                entries.append({"root": root, "session": DEFAULT_SESSION})
             for f in sorted((Path(root) / DIR_NAME).glob(f"*/{STATE_DIR}/session.json")):
                 entries.append({"root": root, "session": f.parent.parent.name})
         for e in entries:
