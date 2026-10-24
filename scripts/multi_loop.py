@@ -692,8 +692,7 @@ def archive_old_files(root, now):
     return moved
 
 
-def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, mode="agent", order_mode=None,
-            resume=False, goal=None, work_mode=None, areas=None):
+def check_join_args(agent, file):
     if not NAME_RE.match(agent):
         sys.exit("ERROR: --agent must be lowercase [a-z0-9-], 1-24 chars (e.g. claude, codex, gemini-2)")
     if file and not FILE_RE.match(file):
@@ -701,77 +700,95 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
     if file and file.lower() in RESERVED_FILES:
         sys.exit(f"ERROR: --file {file} is reserved: AI tools load it as instructions "
                  "(e.g. claude.md == CLAUDE.md on Windows/macOS). Pick another name, e.g. claude-opus.md")
+
+
+def create_session(root, now, interval, duration, order_mode, goal, work_mode, areas):
+    """A new session (caller holds the lock): clock, ring, work mode; the previous one is archived."""
+    if not (interval and duration and order_mode):
+        sys.exit("NO_ACTIVE_SESSION: to create one pass --interval, --duration and "
+                 "--order-mode random|negotiated (ask the user which order mode)")
+    iv, du = parse_duration(interval), parse_duration(duration)
+    if iv < 30:
+        sys.exit("ERROR: interval must be at least 30s")
+    if du < iv:
+        sys.exit("ERROR: duration must be >= interval")
+    session = {"start": now, "interval": iv, "end": now + du, "root": str(Path(root).resolve()),
+               "stopped": False, "order_mode": order_mode, "agents": {}, "ring": [],
+               "ring_version": 0, "ring_log": [], "negotiation": None,
+               "goal": (goal or "").strip() or None, "work_mode": work_mode or "research"}
+    if session["work_mode"] == "split":
+        session["areas"] = [a.strip() for a in (areas or "").split(",") if a.strip()] or default_areas(root)
+    for old in state_dir(root).glob("agent_*.json"):
+        old.unlink()
+    archived = archive_old_files(root, now)
+    chat_events.reset(state_dir(root), archived[0].parent if archived else
+                      state_dir(root) / "archive" / datetime.fromtimestamp(now).strftime("%Y%m%d-%H%M%S"))
+    if archived:
+        print(f"ARCHIVED {len(archived)} file(s) from the previous session -> {archived[0].parent}")
+    registry_add(root)
+    chat_hub.remember_session(root)
+    print(f"CREATED new session (order_mode={order_mode}, work_mode={session['work_mode']})")
+    if session.get("areas"):
+        print(f"AREAS={','.join(session['areas'])}")
+    return session
+
+
+def refuse_creator_options(root, session, **options):
+    """Creation options on a running session would be silently dropped: the user meant a new review."""
+    given = [f"--{name.replace('_', '-')}" for name, value in options.items() if value]
+    if given:
+        sys.exit(f"SESSION_EXISTS: session '{current_session()}' is already active in {Path(root).resolve()} "
+                 f"(goal={session.get('goal') or '-'}). To join it, drop {' '.join(given)}. "
+                 "To run another review at the same time, add --session <new-name>.")
+    print(f"JOINED existing session '{current_session()}' (started {stamp(session['start'])}, "
+          f"order_mode={session['order_mode']}, work_mode={session.get('work_mode', 'research')})")
+
+
+def add_agent(session, agent, file, prefix, mode, resume, now):
+    """Put the agent into the session (caller holds the lock): new, rejoining, or resuming."""
+    agents = session.setdefault("agents", {})
+    if agent in agents:
+        info = agents[agent]
+        if info.get("left"):
+            info["left"] = False
+            print(f"REJOINED as {agent} (kept file {info['file']}, prefix {info['prefix']})")
+            rebuild_ring_on_join(session, agent)
+        elif resume:
+            print(f"RESUMED as {agent} (kept file {info['file']}, prefix {info['prefix']})")
+        else:
+            sys.exit(f"ERROR: '{agent}' is already active. A different agent must pick another name "
+                     f"(e.g. {agent}-2). If you ARE {agent} and lost your context, run join again "
+                     "with --resume.")
+        return info
+    used_files = {a["file"].lower() for a in agents.values()}
+    used_prefixes = {a["prefix"] for a in agents.values()}
+    if prefix:
+        prefix = prefix.upper()
+        if not re.fullmatch(r"[A-Z0-9]{1,4}", prefix) or prefix in used_prefixes:
+            sys.exit(f"ERROR: prefix {prefix} invalid or taken ({sorted(used_prefixes)})")
+    else:
+        prefix = pick_prefix(agent, used_prefixes)
+    file = file or f"{prefix.lower()}.md"
+    if file.lower() in used_files:
+        sys.exit(f"ERROR: file {file} already belongs to another agent; pass --file")
+    info = agents[agent] = {"file": file, "prefix": prefix, "joined": now, "mode": mode, "left": False}
+    rebuild_ring_on_join(session, agent)
+    return info
+
+
+def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, mode="agent", order_mode=None,
+            resume=False, goal=None, work_mode=None, areas=None):
+    check_join_args(agent, file)
     now = time.time()
-    created = False
     with Lock(root):
         session = load_session(root)
-        if not is_active(session, now):
-            if not (interval and duration and order_mode):
-                sys.exit("NO_ACTIVE_SESSION: to create one pass --interval, --duration and "
-                         "--order-mode random|negotiated (ask the user which order mode)")
-            iv, du = parse_duration(interval), parse_duration(duration)
-            if iv < 30:
-                sys.exit("ERROR: interval must be at least 30s")
-            if du < iv:
-                sys.exit("ERROR: duration must be >= interval")
-            session = {"start": now, "interval": iv, "end": now + du, "root": str(Path(root).resolve()),
-                       "stopped": False, "order_mode": order_mode, "agents": {}, "ring": [],
-                       "ring_version": 0, "ring_log": [], "negotiation": None,
-                       "goal": (goal or "").strip() or None, "work_mode": work_mode or "research"}
-            if session["work_mode"] == "split":
-                session["areas"] = [a.strip() for a in (areas or "").split(",") if a.strip()] or default_areas(root)
-            for old in state_dir(root).glob("agent_*.json"):
-                old.unlink()
-            archived = archive_old_files(root, now)
-            chat_events.reset(state_dir(root), archived[0].parent if archived else
-                              state_dir(root) / "archive" / datetime.fromtimestamp(now).strftime("%Y%m%d-%H%M%S"))
-            if archived:
-                print(f"ARCHIVED {len(archived)} file(s) from the previous session -> {archived[0].parent}")
-            registry_add(root)
-            chat_hub.remember_session(root)
-            created = True
-            print(f"CREATED new session (order_mode={order_mode}, work_mode={session['work_mode']})")
-            if session.get("areas"):
-                print(f"AREAS={','.join(session['areas'])}")
+        created = not is_active(session, now)
+        if created:
+            session = create_session(root, now, interval, duration, order_mode, goal, work_mode, areas)
         else:
-            creator_only = [o for o, v in (("--interval", interval), ("--duration", duration),
-                                           ("--order-mode", order_mode), ("--work-mode", work_mode),
-                                           ("--areas", areas), ("--goal", goal)) if v]
-            if creator_only:
-                # These would be silently dropped: the user meant a new review, not this one.
-                sys.exit(f"SESSION_EXISTS: session '{current_session()}' is already active in {Path(root).resolve()} "
-                         f"(goal={session.get('goal') or '-'}). To join it, drop {' '.join(creator_only)}. "
-                         "To run another review at the same time, add --session <new-name>.")
-            print(f"JOINED existing session '{current_session()}' (started {stamp(session['start'])}, "
-                  f"order_mode={session['order_mode']}, work_mode={session.get('work_mode', 'research')})")
-        agents = session.setdefault("agents", {})
-        if agent in agents:
-            info = agents[agent]
-            if info.get("left"):
-                info["left"] = False
-                print(f"REJOINED as {agent} (kept file {info['file']}, prefix {info['prefix']})")
-                rebuild_ring_on_join(session, agent)
-            elif resume:
-                print(f"RESUMED as {agent} (kept file {info['file']}, prefix {info['prefix']})")
-            else:
-                sys.exit(f"ERROR: '{agent}' is already active. A different agent must pick another name "
-                         f"(e.g. {agent}-2). If you ARE {agent} and lost your context, run join again "
-                         "with --resume.")
-        else:
-            used_files = {a["file"].lower() for a in agents.values()}
-            used_prefixes = {a["prefix"] for a in agents.values()}
-            if prefix:
-                prefix = prefix.upper()
-                if not re.fullmatch(r"[A-Z0-9]{1,4}", prefix) or prefix in used_prefixes:
-                    sys.exit(f"ERROR: prefix {prefix} invalid or taken ({sorted(used_prefixes)})")
-            else:
-                prefix = pick_prefix(agent, used_prefixes)
-            file = file or f"{prefix.lower()}.md"
-            if file.lower() in used_files:
-                sys.exit(f"ERROR: file {file} already belongs to another agent; pass --file")
-            info = {"file": file, "prefix": prefix, "joined": now, "mode": mode, "left": False}
-            agents[agent] = info
-            rebuild_ring_on_join(session, agent)
+            refuse_creator_options(root, session, interval=interval, duration=duration, order_mode=order_mode,
+                                   work_mode=work_mode, areas=areas, goal=goal)
+        info = add_agent(session, agent, file, prefix, mode, resume, now)
         save_json(session_path(root), session)
     own = review_dir(root) / info["file"]
     if not own.exists():
@@ -780,10 +797,10 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
     # Baseline: the first TICK only reports changes that appear after joining.
     snapshot(root, session, agent)
     log_events(root)
-    earlier = take_user_messages(root, agent)
+    # A late joiner sees what the user wrote before; after lost context, everything still unanswered.
+    earlier = unanswered(root, session, agent) if resume else take_user_messages(root, agent)
     if resume:
-        # Lost context: everything still unanswered, not only what was never shown.
-        earlier = unanswered(root, session, agent)
+        take_user_messages(root, agent)  # mark them shown, as a normal join does
     if earlier:
         print(user_line(earlier))
     if created and mode != "drive":
