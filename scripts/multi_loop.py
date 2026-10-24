@@ -1154,7 +1154,8 @@ def describe(root):
                        "left": bool(a.get("left")),
                        "stale": bool(session) and is_active(session, now) and is_stale(root, session, name, now),
                        "typing": is_active(session, now) and not a.get("left") and now - mtime < TYPING_WINDOW})
-    return {"session": {"name": SESSION, "project": Path(root).resolve().name, "goal": session.get("goal"),
+    return {"session": {"name": SESSION, "project": Path(root).resolve().name, "title": session.get("title"),
+                        "goal": session.get("goal"),
                         "start": session.get("start", now), "end": session.get("end", now),
                         "interval": session.get("interval", 0), "order_mode": session.get("order_mode"),
                         "work_mode": session.get("work_mode", "research"), "active": is_active(session, now),
@@ -1188,6 +1189,37 @@ def remember_session(root):
             old = []
         keep = [e for e in old if not same_session(e, root, SESSION)][-(RECENT_KEEP - 1):]
         save_json(recent_path(), keep + [{"root": root, "session": SESSION, "created": time.time()}])
+
+
+TITLE_MAX = 60
+
+
+def set_title(root, title):
+    """Display name of a session (chat panel, `rename`). Only a label: the session's name, folder and
+    every NEXT: command stay the same, so a running review is not disturbed. Empty = no title."""
+    title = " ".join((title or "").split())  # one line, no control characters
+    if len(title) > TITLE_MAX:
+        raise ValueError(f"name longer than {TITLE_MAX} characters")
+    with Lock(root):
+        session = load_session(root)
+        if not session:
+            raise ValueError("no such session")
+        if title:
+            session["title"] = title
+        else:
+            session.pop("title", None)
+        save_json(session_path(root), session)
+    return title or None
+
+
+def cmd_rename(args):
+    if not load_session(args.root):
+        sys.exit("NO_SESSION")
+    try:
+        title = set_title(args.root, args.title)
+    except ValueError as e:
+        sys.exit(f"ERROR: {e}")
+    print(f"RENAMED session '{SESSION}' -> {title or '(no title)'}")
 
 
 def session_key(root, session):
@@ -1232,7 +1264,8 @@ class ChatHub:
             seen.add(key)
             out.append({"key": key, "root": str(Path(e["root"]).resolve()),
                         "session": e.get("session", DEFAULT_SESSION),
-                        "project": Path(e["root"]).resolve().name, "goal": s.get("goal"),
+                        "project": Path(e["root"]).resolve().name, "title": s.get("title"),
+                        "goal": s.get("goal"),
                         "active": is_active(s, now), "start": s.get("start", 0), "end": ended_at(e, s, now),
                         "agents": len(active_agents(s))})
         out.sort(key=lambda x: (not x["active"], -x["start"]))
@@ -1259,6 +1292,9 @@ class ChatHub:
 
     def say(self, key, text):
         return self._run(key, lambda root: post_user_message(root, text))
+
+    def rename(self, key, title):
+        return self._run(key, lambda root: set_title(root, title))
 
 
 def hub_running():
@@ -1650,6 +1686,8 @@ def main():
     d.add_argument("--exec", required=True, help="shell command that reads the prompt on stdin, prints the answer")
     d.add_argument("--call-timeout", default="15m")
     d.add_argument("--max-chars", type=int, default=200000, help="prompt size cap (shrink for small local models)")
+    rn = sub.add_parser("rename", help="display name of the session in the chat panel")
+    rn.add_argument("--title", required=True, help='e.g. "API security review" ("" removes it)')
     ch = sub.add_parser("chat", help="the chat panel of every session on this machine (localhost only)")
     ch.add_argument("--port", type=int, default=8777)
     ch.add_argument("--replay", action="store_true", help="open the selected session as a replay")
@@ -1672,7 +1710,8 @@ def main():
         set_session(session)
     {"join": cmd_join, "wait": cmd_wait, "propose": cmd_propose, "shuffle": cmd_shuffle,
      "roster": cmd_roster, "status": cmd_status, "leave": cmd_leave, "stop": cmd_stop,
-     "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive, "chat": cmd_chat}[args.cmd](args)
+     "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive, "chat": cmd_chat,
+     "rename": cmd_rename}[args.cmd](args)
 
 
 if __name__ == "__main__":

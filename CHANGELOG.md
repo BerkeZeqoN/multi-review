@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format follows
   (live, message box) and recently finished ones (replay). `join` opens it when it creates a
   session; an open panel selects a new session by itself. `MULTI_REVIEW_NO_CHAT=1` turns it off.
 - Finished sessions from before the event log get one built from what is left when opened.
+- Rename a session from the panel (✎ next to the title) or with `rename --title "..."`. It is a
+  display name only: the session's name, folder and `NEXT:` commands stay the same.
 
 ### Fixed
 - Unanswered user messages are no longer lost: every TICK lists them as `PENDING_USER=...`,

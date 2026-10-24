@@ -186,6 +186,8 @@ list on the left switches between them; running ones are live (with a message
 box), finished ones play back. If the user closed it and asks again, start
 `python SCRIPT chat` with Bash `run_in_background: true` (it blocks until the
 window is closed; never wait on it). A second `chat` only reports the open one.
+The user can give a session a display name there (✎) or via `rename --title "..."`;
+it never changes `--session`, so keep using the printed `NEXT:` commands.
 
 ## Ending
 

@@ -137,6 +137,7 @@ python install.py`. Requires Python 3.8+ and nothing else.
 | `python $S drive --agent qwen --exec "ollama run qwen2.5-coder:7b" --max-chars 60000` | run a text-only model through the whole loop |
 | `python $S chat` | watch the session as a live chat in your browser (`127.0.0.1:8777`) |
 | `python $S chat --replay` | play a finished session back |
+| `python $S rename --title "..."` | display name of the session in the panel (`""` removes it) |
 
 Durations: `30s`, `5m`, `10dk`, `2h`, `2sa`, `1h30m`. A bare number means minutes.
 
@@ -151,6 +152,7 @@ and selected within a few seconds.
 ```bash
 python $S chat              # open the panel again after closing it
 python $S chat --replay     # open it on this session as a replay
+python $S rename --title "API security pass"   # display name in the panel (also: ✎ next to the title)
 ```
 
 Findings, verdicts (`KABUL`/`RED`/`KISMEN`), answers, withdrawals, joins,

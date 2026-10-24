@@ -336,6 +336,38 @@ class UserMessages(Sync):
         self.assertEqual(m.user_messages(self.root)[0]["to"], "claude")
         self.assertIn("user", [e["kind"] for e in self.events()])
 
+    def test_rename_from_the_page(self):
+        server, base, key = self.serve()
+        with urllib.request.urlopen(base + "/") as r:
+            token = r.read().decode("utf-8").split('TOKEN = "')[1].split('"')[0]
+
+        def rename(title, **headers):
+            req = urllib.request.Request(base + "/api/rename", data=json.dumps({"s": key, "text": title}).encode(),
+                                         headers=dict({"Content-Type": "application/json", "Origin": base,
+                                                       "X-MR-Token": token}, **headers), method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.status, json.loads(r.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                e.close()
+                return e.code, None
+
+        self.assertEqual(rename("x", **{"X-MR-Token": "guess"})[0], 403)
+        self.assertEqual(rename("x", Origin="http://evil.example")[0], 403)
+        self.assertEqual(rename("API  security\nreview"), (200, {"ok": True, "title": "API security review"}))
+        self.assertEqual(m.load_session(self.root)["title"], "API security review")
+        listed = json.loads(self.get(base + "/api/sessions")[1])["sessions"]
+        self.assertEqual(listed[0]["title"], "API security review")
+        self.assertEqual(rename("y" * (m.TITLE_MAX + 1))[0], 400)
+        quiet(m.cmd_stop, argparse.Namespace(root=self.root))  # finished sessions can be renamed too
+        self.assertEqual(rename(""), (200, {"ok": True, "title": None}))
+        self.assertNotIn("title", m.load_session(self.root))
+        self.assertTrue(m.load_session(self.root)["stopped"])  # renaming changed nothing else
+
+    def test_rename_command(self):
+        quiet(m.cmd_rename, argparse.Namespace(root=self.root, title="Docs pass"))
+        self.assertEqual(m.describe(self.root)["session"]["title"], "Docs pass")
+
     def test_finished_session_takes_no_messages_from_the_page(self):
         server, base, key = self.serve()
         with urllib.request.urlopen(base + "/") as r:

@@ -159,9 +159,10 @@ def make_server(hub, port=8777, initial=None, replay_first=False):
                 self.send(404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802 - http.server API
-            """The message box. A message reaches AI agents as a request from the user, so only this
-            page may send one: same Host and Origin (no DNS rebinding, no cross-site form), JSON body
-            (forces a CORS preflight that this server never answers) and the per-run token."""
+            """Message box (/api/say) and session name (/api/rename). A message reaches AI agents as a
+            request from the user, so only this page may write: same Host and Origin (no DNS rebinding,
+            no cross-site form), JSON body (forces a CORS preflight that this server never answers) and
+            the per-run token."""
             try:
                 size = int(self.headers.get("Content-Length") or 0)
             except ValueError:
@@ -170,7 +171,8 @@ def make_server(hub, port=8777, initial=None, replay_first=False):
                 self.close_connection = True
                 return self.send(413, {"error": "message too large"})
             raw = self.rfile.read(size)  # read before any answer: an unread body resets the connection
-            if urlparse(self.path).path != "/api/say":
+            action = {"/api/say": "say", "/api/rename": "rename"}.get(urlparse(self.path).path)
+            if not action:
                 return self.send(404, {"error": "not found"})
             port = self.server.server_address[1]
             ok = (self.host_ok() and self.headers.get("Origin") in (f"http://127.0.0.1:{port}",
@@ -184,7 +186,10 @@ def make_server(hub, port=8777, initial=None, replay_first=False):
                 key, text = body.get("s", ""), body.get("text", "")
                 if not known(key):
                     return self.send(404, {"error": "unknown session"})
-                msg = hub.say(key, text if isinstance(text, str) else "")
+                text = text if isinstance(text, str) else ""
+                if action == "rename":
+                    return self.send(200, {"ok": True, "title": hub.rename(key, text)})
+                msg = hub.say(key, text)
             except (ValueError, AttributeError) as e:  # bad JSON, empty, too long, session over
                 return self.send(400, {"error": str(e)})
             hub.sync(key)
@@ -318,6 +323,10 @@ PAGE = r"""<!doctype html>
   main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   header { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: space-between; align-items: center; padding: 14px 22px; border-bottom: 1px solid var(--line); font: 12.5px var(--mono); color: var(--muted); }
   header b { color: var(--paper); }
+  .titlebox { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .titlebox input { font: 600 13px var(--mono); color: var(--paper); background: var(--panel); border: 1px solid var(--ok); border-radius: 6px; padding: 4px 8px; width: min(380px, 50vw); }
+  .icon { padding: 2px 7px; font-size: 12px; color: var(--muted); }
+  .icon:hover { color: var(--paper); }
   .clock { color: var(--ok); }
   .note { font: 11.5px var(--mono); color: var(--muted); padding: 8px 22px; border-bottom: 1px solid var(--line); background: var(--side); }
   .feed { flex: 1; overflow-y: auto; padding: 18px 22px 28px; display: flex; flex-direction: column; gap: 10px; }
@@ -379,7 +388,7 @@ PAGE = r"""<!doctype html>
     <div class="ring" id="ring"></div>
   </aside>
   <main>
-    <header><span><b id="title">multi-review</b> &nbsp;every finding needs path:line</span><span><span class="clock" id="clock"></span> <button id="restart" hidden>replay again</button></span></header>
+    <header><span class="titlebox"><b id="title">multi-review</b><button class="icon" id="rename" type="button" title="Rename this session (display name only)" aria-label="Rename this session" hidden>✎</button><input id="titleInput" maxlength="60" aria-label="Session name" hidden><span id="tagline">every finding needs path:line</span></span><span><span class="clock" id="clock"></span> <button id="restart" hidden>replay again</button></span></header>
     <div class="note">Built from the agents' review files, not a transcript of what they said.</div>
     <div class="feed" id="feed"><div class="empty" id="empty">No session yet.<br>Start one with <code>/multi-review</code>; it shows up here by itself.</div></div>
     <form class="compose" id="compose" hidden>
@@ -488,7 +497,7 @@ function sessionList(fresh) {
   box.replaceChildren(...sessions.map((s) => {
     const b = el("button", "sess" + (s.active ? " live" : "") + (s.key === current ? " on" : "") + (fresh.has(s.key) ? " fresh" : ""));
     b.type = "button";
-    const name = el("b"); name.append(el("i"), `${s.project} · ${s.session}`);
+    const name = el("b"); name.append(el("i"), s.title || `${s.project} · ${s.session}`);
     b.append(name, el("span", null, (s.active ? `live · ${fmt(s.end - Date.now() / 1000)} left` : "ended · " + ago(s.end)) + ` · ${s.agents} agent${s.agents === 1 ? "" : "s"}`));
     if (s.goal) b.appendChild(el("span", null, s.goal));
     b.title = s.root; b.onclick = () => select(s.key);
@@ -498,7 +507,8 @@ function sessionList(fresh) {
 }
 function sidebar(speaking) {
   const s = state.session, box = document.getElementById("agents");
-  document.getElementById("title").textContent = `${s.project} · #${s.name}`;
+  document.getElementById("title").textContent = s.title || `${s.project} · #${s.name}`;
+  document.getElementById("rename").hidden = false;
   document.getElementById("meta").textContent = `${s.order_mode} · ${s.work_mode} · every ${fmt(s.interval)}`;
   document.getElementById("goal").textContent = s.goal ? "goal: " + s.goal : "";
   document.getElementById("agentsLabel").hidden = false;
@@ -595,6 +605,28 @@ async function send() {
 form.onsubmit = (ev) => { ev.preventDefault(); send(); };
 box.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); } });
 box.addEventListener("input", () => { box.style.height = "auto"; box.style.height = Math.min(box.scrollHeight, 160) + "px"; });
+
+// Rename: a display name in session.json; the session's real name (--session, folder) never changes.
+const titleEl = document.getElementById("title"), titleIn = document.getElementById("titleInput"), renameBtn = document.getElementById("rename");
+function editTitle(on) {
+  titleEl.hidden = renameBtn.hidden = on; titleIn.hidden = !on; document.getElementById("tagline").hidden = on;
+  if (on) { titleIn.value = (state && state.session.title) || ""; titleIn.placeholder = state ? `${state.session.project} · #${state.session.name}` : ""; titleIn.focus(); titleIn.select(); }
+}
+async function saveTitle() {
+  const key = current, title = titleIn.value.trim();
+  try {
+    const r = await fetch("/api/rename", { method: "POST", headers: { "Content-Type": "application/json", "X-MR-Token": TOKEN }, body: JSON.stringify({ s: key, text: title }) });
+    const out = await r.json();
+    if (!r.ok) throw new Error(out.error || r.status);
+    if (state && key === current) state.session.title = out.title;
+    sessions.forEach((x) => { if (x.key === key) x.title = out.title; });
+    sessionList(new Set());
+  } catch (err) { document.getElementById("clock").textContent = "rename failed: " + err.message; }
+  editTitle(false); if (state) titleEl.textContent = state.session.title || `${state.session.project} · #${state.session.name}`;
+}
+renameBtn.onclick = () => editTitle(true);
+titleIn.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); saveTitle(); } else if (ev.key === "Escape") editTitle(false); });
+titleIn.addEventListener("blur", () => { if (!titleIn.hidden) saveTitle(); });
 
 loadSessions(); setInterval(loadSessions, 3000);
 setInterval(() => { if (mode === "live") poll(); }, 2000);
