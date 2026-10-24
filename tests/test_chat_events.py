@@ -21,6 +21,7 @@ from pathlib import Path
 os.environ["MULTI_REVIEW_NO_CHAT"] = "1"  # creating a session must not open the chat window in tests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import chat_events as ce  # noqa: E402
+import chat_hub as hub  # noqa: E402
 import chat_view as cv  # noqa: E402
 import multi_loop as m  # noqa: E402
 
@@ -155,11 +156,11 @@ class Sync(unittest.TestCase):
         self.assertEqual(ce.sync(m.state_dir(self.root), m.review_dir(self.root), m.load_session(self.root)), 0)
 
     def serve(self):
-        server = cv.make_server(m.ChatHub(), port=0)
+        server = cv.make_server(hub.ChatHub(), port=0)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        return server, f"http://127.0.0.1:{server.server_address[1]}", m.session_key(self.root, "main")
+        return server, f"http://127.0.0.1:{server.server_address[1]}", hub.session_key(self.root, "main")
 
     def get(self, url, **headers):
         try:
@@ -205,7 +206,7 @@ class Sync(unittest.TestCase):
             quiet(m.cmd_stop, argparse.Namespace(root=self.root))
         finally:
             m.set_session("main")
-        listed = {x["session"]: x for x in m.ChatHub().sessions()}
+        listed = {x["session"]: x for x in hub.ChatHub().sessions()}
         self.assertEqual(set(listed), {"main", "docs"})
         self.assertFalse(listed["docs"]["active"])
         self.assertLessEqual(listed["docs"]["end"], time.time())  # stopped early: not the planned end
@@ -216,10 +217,10 @@ class Sync(unittest.TestCase):
             quiet(m.do_join, self.root, "codex", "5m", "1h", order_mode="random")
         finally:
             m.set_session("main")
-        m.save_json(m.recent_path(), [{"root": self.root, "session": "docs", "created": 0}])
+        m.save_json(hub.recent_path(), [{"root": self.root, "session": "docs", "created": 0}])
         quiet(m.cmd_stop, argparse.Namespace(root=self.root))
         m.registry_prune()
-        self.assertIn("main", {x["session"] for x in m.ChatHub().sessions()})
+        self.assertIn("main", {x["session"] for x in hub.ChatHub().sessions()})
 
     def test_finished_and_new_sessions_are_listed(self):
         quiet(m.cmd_stop, argparse.Namespace(root=self.root))
@@ -227,7 +228,7 @@ class Sync(unittest.TestCase):
         second.mkdir()
         m.set_session("main")
         quiet(m.do_join, str(second), "codex", "5m", "1h", order_mode="random")
-        listed = m.ChatHub().sessions()
+        listed = hub.ChatHub().sessions()
         self.assertEqual([(Path(x["root"]).name, x["active"]) for x in listed], [("second", True), ("proj", False)])
 
 
@@ -358,15 +359,15 @@ class UserMessages(Sync):
         self.assertEqual(m.load_session(self.root)["title"], "API security review")
         listed = json.loads(self.get(base + "/api/sessions")[1])["sessions"]
         self.assertEqual(listed[0]["title"], "API security review")
-        self.assertEqual(rename("y" * (m.TITLE_MAX + 1))[0], 400)
+        self.assertEqual(rename("y" * (hub.TITLE_MAX + 1))[0], 400)
         quiet(m.cmd_stop, argparse.Namespace(root=self.root))  # finished sessions can be renamed too
         self.assertEqual(rename(""), (200, {"ok": True, "title": None}))
         self.assertNotIn("title", m.load_session(self.root))
         self.assertTrue(m.load_session(self.root)["stopped"])  # renaming changed nothing else
 
     def test_rename_command(self):
-        quiet(m.cmd_rename, argparse.Namespace(root=self.root, title="Docs pass"))
-        self.assertEqual(m.describe(self.root)["session"]["title"], "Docs pass")
+        quiet(hub.cmd_rename, argparse.Namespace(root=self.root, title="Docs pass"))
+        self.assertEqual(hub.describe(self.root)["session"]["title"], "Docs pass")
 
     def test_finished_session_takes_no_messages_from_the_page(self):
         server, base, key = self.serve()
@@ -376,8 +377,8 @@ class UserMessages(Sync):
         self.assertEqual(self.post(server, {"s": key, "text": "hi"}, **{"X-MR-Token": token}), 400)
 
     def test_join_does_not_open_a_window_in_tests(self):
-        self.assertFalse(m.AUTO_CHAT)
-        self.assertIsNone(m.hub_running())
+        self.assertFalse(hub.AUTO_CHAT)
+        self.assertIsNone(hub.hub_running())
 
 
 class SessionContext(unittest.TestCase):

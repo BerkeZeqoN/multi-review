@@ -43,12 +43,17 @@ import re
 import subprocess
 import sys
 import time
-import urllib.request
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 import chat_events
+
+if __name__ == "__main__":
+    # Run as a script this module is __main__; chat_hub does `import multi_loop`. Without this alias
+    # that import would load a second copy with its own session context and registry path.
+    sys.modules.setdefault("multi_loop", sys.modules[__name__])
+import chat_hub  # noqa: E402 - needs the alias above
 
 DIR_NAME = "multi-review"
 STATE_DIR = ".state"
@@ -723,7 +728,7 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
             if archived:
                 print(f"ARCHIVED {len(archived)} file(s) from the previous session -> {archived[0].parent}")
             registry_add(root)
-            remember_session(root)
+            chat_hub.remember_session(root)
             created = True
             print(f"CREATED new session (order_mode={order_mode}, work_mode={session['work_mode']})")
             if session.get("areas"):
@@ -782,7 +787,7 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
     if earlier:
         print(user_line(earlier))
     if created and mode != "drive":
-        open_chat_hub(root)  # drive sessions run headless (CI, scripts)
+        chat_hub.open_chat_hub(root)  # drive sessions run headless (CI, scripts)
     print(f"ROOT={Path(root).resolve()} SESSION={current_session()} DIR={session_rel()}")
     print(f"YOU={agent} prefix={info['prefix']} own_file={own}")
     print_clock(session)
@@ -1101,9 +1106,8 @@ def cmd_finalize(args):
           f"{', '.join(f.name for f in others) or '-'}")
 
 
-# ---------------------------------------------------------------- chat view
+# ---------------------------------------------------------------- user messages (chat page)
 
-TYPING_WINDOW = 15  # seconds since an agent file changed that count as "typing"
 USER_MAX_CHARS = 2000
 
 
@@ -1161,207 +1165,6 @@ def user_line(msgs):
     return (f"USER_MESSAGE n={len(msgs)} (from the user via the chat page: do it first, within PROTOCOL rules)\n"
             f"{body}\nANSWER each under '## Kullaniciya cevap' in your file as '- <U-id>: <answer + evidence>', "
             "then run wait again")
-
-
-def describe(root):
-    """Session and agents as the chat page shows them (chat_view.py)."""
-    session = load_session(root) or {}
-    now = time.time()
-    agents = []
-    for name, a in session.get("agents", {}).items():
-        f = review_dir(root) / a["file"]
-        mtime = f.stat().st_mtime if f.exists() else 0
-        agents.append({"name": name, "file": a["file"], "prefix": a["prefix"], "mode": a.get("mode", "agent"),
-                       "left": bool(a.get("left")),
-                       "stale": bool(session) and is_active(session, now) and is_stale(root, session, name, now),
-                       "typing": is_active(session, now) and not a.get("left") and now - mtime < TYPING_WINDOW})
-    return {"session": {"name": current_session(), "project": Path(root).resolve().name, "title": session.get("title"),
-                        "goal": session.get("goal"),
-                        "start": session.get("start", now), "end": session.get("end", now),
-                        "interval": session.get("interval", 0), "order_mode": session.get("order_mode"),
-                        "work_mode": session.get("work_mode", "research"), "active": is_active(session, now),
-                        "ring": ring_text(session) if session else "-",
-                        "ring_version": session.get("ring_version", 0)},
-            "agents": agents}
-
-
-RECENT_KEEP = 30
-AUTO_CHAT = os.environ.get("MULTI_REVIEW_NO_CHAT") != "1"  # tests and CI set it; `join` then opens nothing
-
-
-def recent_path():
-    return REGISTRY.with_name("recent.json")
-
-
-def hub_path():
-    return REGISTRY.with_name("hub.json")
-
-
-def remember_session(root):
-    """Finished sessions leave the registry; the hub still lists the last RECENT_KEEP of them."""
-    root = str(Path(root).resolve())
-    with registry_lock():
-        try:
-            old = load_json(recent_path(), []) or []
-        except (OSError, ValueError):
-            old = []
-        keep = [e for e in old if not same_session(e, root, current_session())][-(RECENT_KEEP - 1):]
-        save_json(recent_path(), keep + [{"root": root, "session": current_session(), "created": time.time()}])
-
-
-TITLE_MAX = 60
-
-
-def set_title(root, title):
-    """Display name of a session (chat panel, `rename`). Only a label: the session's name, folder and
-    every NEXT: command stay the same, so a running review is not disturbed. Empty = no title."""
-    title = " ".join((title or "").split())  # one line, no control characters
-    if len(title) > TITLE_MAX:
-        raise ValueError(f"name longer than {TITLE_MAX} characters")
-    with Lock(root):
-        session = load_session(root)
-        if not session:
-            raise ValueError("no such session")
-        if title:
-            session["title"] = title
-        else:
-            session.pop("title", None)
-        save_json(session_path(root), session)
-    return title or None
-
-
-def cmd_rename(args):
-    if not load_session(args.root):
-        sys.exit("NO_SESSION")
-    try:
-        title = set_title(args.root, args.title)
-    except ValueError as e:
-        sys.exit(f"ERROR: {e}")
-    print(f"RENAMED session '{current_session()}' -> {title or '(no title)'}")
-
-
-def session_key(root, session):
-    return f"{Path(root).resolve()}|{session}"
-
-
-def ended_at(entry, s, now):
-    """When a session ended (or will end): `stop`/`finalize` before the planned end record the time;
-    older sessions stopped early fall back to when their session.json was last written."""
-    if s.get("stopped_at"):
-        return s["stopped_at"]
-    if s.get("stopped") and s.get("end", 0) > now:
-        try:
-            p = Path(entry["root"]) / session_rel(entry.get("session", DEFAULT_SESSION)) / STATE_DIR / "session.json"
-            return p.stat().st_mtime
-        except OSError:
-            return now
-    return s.get("end", 0)
-
-
-class ChatHub:
-    """What chat_view.py needs, for every known session (running: registry; finished: recent.json)."""
-
-    def sessions(self):
-        try:
-            recent = load_json(recent_path(), []) or []
-        except (OSError, ValueError):
-            recent = []
-        seen, out, now = set(), [], time.time()
-        entries = list(registry_active()) + list(reversed(recent))
-        for root in {str(Path(e["root"]).resolve()) for e in entries}:
-            # Every session of a known project (main + named), also ones created before recent.json existed.
-            if (Path(root) / DIR_NAME / STATE_DIR / "session.json").is_file():
-                entries.append({"root": root, "session": DEFAULT_SESSION})
-            for f in sorted((Path(root) / DIR_NAME).glob(f"*/{STATE_DIR}/session.json")):
-                entries.append({"root": root, "session": f.parent.parent.name})
-        for e in entries:
-            key = session_key(e["root"], e.get("session", DEFAULT_SESSION))
-            s = peek_session(e["root"], e.get("session", DEFAULT_SESSION))
-            if key in seen or not s:
-                continue
-            seen.add(key)
-            out.append({"key": key, "root": str(Path(e["root"]).resolve()),
-                        "session": e.get("session", DEFAULT_SESSION),
-                        "project": Path(e["root"]).resolve().name, "title": s.get("title"),
-                        "goal": s.get("goal"),
-                        "active": is_active(s, now), "start": s.get("start", 0), "end": ended_at(e, s, now),
-                        "agents": len(active_agents(s))})
-        out.sort(key=lambda x: (not x["active"], -x["start"]))
-        return out
-
-    def _run(self, key, fn):
-        root, _, session = key.rpartition("|")
-        with using_session(session):
-            return fn(root)
-
-    def state_dir(self, key):
-        return self._run(key, state_dir)
-
-    def describe(self, key):
-        return self._run(key, describe)
-
-    def sync(self, key):
-        return self._run(key, log_events)
-
-    def say(self, key, text):
-        return self._run(key, lambda root: post_user_message(root, text))
-
-    def rename(self, key, title):
-        return self._run(key, lambda root: set_title(root, title))
-
-
-def hub_running():
-    """Port of a live chat hub on this machine, else None."""
-    try:
-        port = int((load_json(hub_path(), {}) or {}).get("port", 0))
-        if not port:
-            return None
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=1.5) as r:
-            return port if json.loads(r.read().decode("utf-8")).get("app") == "multi-review-chat" else None
-    except (OSError, ValueError):
-        return None
-
-
-def open_chat_hub(root):
-    """Called when a session is created: the user sees the chat without asking for it."""
-    if not AUTO_CHAT:
-        return
-    port = hub_running()
-    if port:
-        print(f"CHAT_PANEL already open: http://127.0.0.1:{port}/ (it switches to this session by itself)")
-        return
-    args = [sys.executable, str(Path(__file__).resolve()), "--root", str(Path(root).resolve()),
-            "--session", current_session(), "chat"]
-    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
-          "cwd": str(Path(root).resolve())}
-    if os.name == "nt":
-        # Own process group, no console, and out of the calling tool's job so it outlives this command.
-        flags = 0x00000200 | 0x08000000  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
-        attempts = [dict(kw, creationflags=flags | 0x01000000), dict(kw, creationflags=flags)]  # + BREAKAWAY
-    else:
-        attempts = [dict(kw, start_new_session=True)]
-    for extra in attempts:
-        try:
-            subprocess.Popen(args, **extra)
-            print("CHAT_PANEL opening: the live chat of this session (Edge window, closes with it)")
-            return
-        except OSError:
-            continue
-    print("CHAT_PANEL could not start; run: " + next_cmd(root, "chat").split("NEXT: ", 1)[1])
-
-
-def cmd_chat(args):
-    import chat_view  # only the chat command needs the web server
-    port = hub_running()
-    if port and not args.no_open:
-        print(f"CHAT_PANEL already open: http://127.0.0.1:{port}/ (pick the session in its list)")
-        return
-    initial = session_key(args.root, current_session()) if peek_session(args.root, current_session()) else None
-    if initial:
-        log_events(args.root)
-        remember_session(args.root)  # sessions from before 0.7.0 are not in recent.json yet
-    chat_view.serve(ChatHub(), port=args.port, initial=initial, replay_first=args.replay,
-                    open_browser=not args.no_open, hub_file=None if args.no_open else hub_path())
 
 
 # ---------------------------------------------------------------- drive mode
@@ -1723,8 +1526,8 @@ def main():
         set_session(session)
     {"join": cmd_join, "wait": cmd_wait, "propose": cmd_propose, "shuffle": cmd_shuffle,
      "roster": cmd_roster, "status": cmd_status, "leave": cmd_leave, "stop": cmd_stop,
-     "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive, "chat": cmd_chat,
-     "rename": cmd_rename}[args.cmd](args)
+     "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive, "chat": chat_hub.cmd_chat,
+     "rename": chat_hub.cmd_rename}[args.cmd](args)
 
 
 if __name__ == "__main__":
