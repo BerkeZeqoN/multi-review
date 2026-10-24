@@ -19,7 +19,8 @@ from pathlib import Path
 
 NAME = "multi-review"
 REPO = Path(__file__).resolve().parent
-FILES = ["SKILL.md", "PROTOCOL.md", "scripts/multi_loop.py", "scripts/chat_events.py", "scripts/chat_view.py"]
+FILES = ["SKILL.md", "PROTOCOL.md", "scripts/multi_loop.py", "scripts/chat_events.py", "scripts/chat_view.py",
+         "scripts/chat_page.html"]
 # Thin slash-command routers (the rules stay in SKILL.md/PROTOCOL.md), only for tools that load them.
 COMMANDS = {"claude": ["commands/multi-review-join.md"]}
 
