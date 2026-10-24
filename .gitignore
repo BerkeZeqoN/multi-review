@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 # review output of sessions run on this repo; never ship it with the skill
 multi-review/
+# LinkedIn/promo assets rendered locally; not part of the skill
+promo/

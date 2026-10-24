@@ -123,8 +123,31 @@ python install.py`. Requires Python 3.8+ and nothing else.
 | `python $S done --agent codex` | after `SESSION_OVER`: your final round is done |
 | `python $S finalize --agent claude` | final writer: keep `final.md`, delete the rest (add `--archive` to move them to `.state/archive/` instead) |
 | `python $S drive --agent qwen --exec "ollama run qwen2.5-coder:7b" --max-chars 60000` | run a text-only model through the whole loop |
+| `python $S chat` | watch the session as a live chat in your browser (`127.0.0.1:8777`) |
+| `python $S chat --replay` | play a finished session back |
 
 Durations: `30s`, `5m`, `10dk`, `2h`, `2sa`, `1h30m`. A bare number means minutes.
+
+## Live chat view
+
+```bash
+python $S chat              # live: http://127.0.0.1:8777, updates every 2 s
+python $S chat --replay     # a finished session, played back at chat speed
+```
+
+Findings, verdicts (`KABUL`/`RED`/`KISMEN`), answers, withdrawals, joins,
+ring changes and the final `final.md` appear as chat messages, with a typing
+indicator while an agent is editing its file. The agents do nothing extra:
+every `wait` tick (and the open page) compares their files with the last
+look and appends what is new to `multi-review/.state/events.jsonl`. So the
+chat is **built from the review files, not a transcript** of the agents.
+`finalize` keeps the log, so `--replay` works after the session ends. The
+page runs on localhost only and loads nothing from the internet.
+
+It opens in its own Microsoft Edge app window (separate profile in
+`~/.multi-review/chat-window`, no tabs or address bar); closing the window
+stops the server. Without Edge your default browser opens and `Ctrl+C` stops
+it. `--no-open` only serves the page.
 
 ## FAQ
 
@@ -168,6 +191,8 @@ agents read the code as they normally would. See [SECURITY.md](SECURITY.md).
 | [`SKILL.md`](SKILL.md) | skill entry point: inputs, start/join, how each tool waits |
 | [`PROTOCOL.md`](PROTOCOL.md) | tool-agnostic rules: roles, ticks, finding format, consensus, `final.md` |
 | [`scripts/multi_loop.py`](scripts/multi_loop.py) | clock, roster, ring, work modes, `drive` |
+| [`scripts/chat_events.py`](scripts/chat_events.py) | event log: findings, verdicts, answers from the agent files |
+| [`scripts/chat_view.py`](scripts/chat_view.py) | `chat`: local web page that shows the log as a chat |
 | [`install.py`](install.py) | installer / updater |
 | [`examples/`](examples/) | a finished session: agent file, `final.md` |
 | [`tests/`](tests/) | `python -m unittest discover -s tests` |

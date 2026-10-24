@@ -54,7 +54,12 @@ python SCRIPT join --agent NAME --resume             # you ARE this agent and lo
 python SCRIPT done --agent NAME                      # after SESSION_OVER: your final round is finished
 python SCRIPT finalize --agent NAME                  # final writer only: keep final.md, delete the rest
 python SCRIPT finalize --agent NAME --archive        # same, but move the rest to .state/archive/
+python SCRIPT chat [--replay]                        # user only: live chat view in the browser
 ```
+
+The chat view is built from your file: write findings as `### <PREFIX>-NNN`
+headings and verdicts as `- <ID>: KABUL|RED|KISMEN - <reason>` lines, and they
+show up as messages.
 
 Several reviews can run at once: every command takes `--session NAME`
 (default `main`, folder `multi-review/`; others `multi-review/<name>/`).

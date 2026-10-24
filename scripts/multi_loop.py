@@ -25,6 +25,8 @@ Commands (run from the project root, or pass --root):
   done     --agent NAME                    final round finished (after SESSION_OVER)
   finalize --agent NAME [--archive]        final writer: wait for everyone's `done`, check
           multi-review/final.md, then delete (or archive) every other md file
+  chat    [--replay] [--port 8777]          the session as a live chat page on localhost; --replay
+          plays a finished session back from .state/events.jsonl
   drive   --agent NAME --exec "CMD" [...]  run the whole loop for a text-only
           model: each round pipes a prompt into CMD (stdin) and writes the
           returned markdown into the agent's own file
@@ -42,6 +44,8 @@ import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+
+import chat_events
 
 DIR_NAME = "multi-review"
 STATE_DIR = ".state"
@@ -590,6 +594,14 @@ def work_check(root, session, agent):
     return line
 
 
+def log_events(root):
+    """Move the chat event log forward (chat_events.py). It is a side channel: never break the loop."""
+    try:
+        chat_events.sync(state_dir(root), review_dir(root), load_session(root), FINAL_FILE)
+    except Exception:  # noqa: BLE001 - a broken log must not stop a review
+        pass
+
+
 def touch_seen(root, agent):
     """Heartbeat: every `wait` (start and tick) refreshes it, so a dead agent loop becomes visible."""
     save_json(state_dir(root) / f"agent_{agent}.seen.json", {"seen": time.time()})
@@ -681,6 +693,8 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
             for old in state_dir(root).glob("agent_*.json"):
                 old.unlink()
             archived = archive_old_files(root, now)
+            chat_events.reset(state_dir(root), archived[0].parent if archived else
+                              state_dir(root) / "archive" / datetime.fromtimestamp(now).strftime("%Y%m%d-%H%M%S"))
             if archived:
                 print(f"ARCHIVED {len(archived)} file(s) from the previous session -> {archived[0].parent}")
             registry_add(root)
@@ -733,6 +747,7 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
         print(f"created {own}")
     # Baseline: the first TICK only reports changes that appear after joining.
     snapshot(root, session, agent)
+    log_events(root)
     print(f"ROOT={Path(root).resolve()} SESSION={SESSION} DIR={session_rel()}")
     print(f"YOU={agent} prefix={info['prefix']} own_file={own}")
     print_clock(session)
@@ -795,6 +810,7 @@ def wait_for_tick(root, agent, max_wait=None):
         session = load_session(root)
         now = time.time()
         if not is_active(session, now):
+            log_events(root)
             return "SESSION_OVER", over_line(session)
         elapsed = now - session["start"]
         next_tick = session["start"] + (int(elapsed // session["interval"]) + 1) * session["interval"]
@@ -811,11 +827,13 @@ def wait_for_tick(root, agent, max_wait=None):
             if time.time() < target:
                 continue
         if not is_active(load_session(root)):
+            log_events(root)
             return "SESSION_OVER", over_line(load_session(root))
         settle_if_due(root)
         session = load_session(root)
         touch_seen(root, agent)
         roles, ring_changed, prev_roles = snapshot(root, session, agent)
+        log_events(root)
         line = (f"TICK {current_tick(session)} review={roles['review'][0]} review_changed={roles['review'][1]} "
                 f"answer={roles['answer'][0]} answer_changed={roles['answer'][1]} "
                 f"ring_changed={'yes' if ring_changed else 'no'}")
@@ -879,6 +897,7 @@ def cmd_propose(args):
         session["negotiation"]["proposals"][args.agent] = order
         result = try_settle(session)
         save_json(session_path(args.root), session)
+    log_events(args.root)
     print(f"PROPOSED {'>'.join(order)}" + (f" -> ADOPTED ({result})" if result else ""))
     print_ring(session, args.agent)
 
@@ -892,6 +911,7 @@ def cmd_shuffle(args):
             sys.exit("ERROR: this session uses order_mode=negotiated; use propose")
         set_ring(session, shuffle_ring(list(active_agents(session)), session.get("ring", [])), "manual shuffle")
         save_json(session_path(args.root), session)
+    log_events(args.root)
     print_ring(session)
 
 
@@ -928,6 +948,7 @@ def cmd_leave(args):
         elif session.get("negotiation") and not valid_proposals(session):
             print("NOTE: every vote listed the leaver and is now void; agents must propose again")
         save_json(session_path(args.root), session)
+    log_events(args.root)
     print(f"LEFT {args.agent}")
     print_ring(session)
 
@@ -941,6 +962,7 @@ def cmd_stop(args):
         session["stopped"] = True
         save_json(session_path(args.root), session)
     registry_prune()
+    log_events(args.root)
     print("STOPPED")
 
 
@@ -1012,6 +1034,7 @@ def cmd_finalize(args):
                      "run finalize again, "
                      "or pass --force to finalize without them")
         time.sleep(5)
+    log_events(root)  # last look at the agent files before they are deleted
     with Lock(root):
         session = load_session(root)
         rd = review_dir(root)
@@ -1028,9 +1051,45 @@ def cmd_finalize(args):
         session["stopped"] = True
         save_json(session_path(root), session)
     registry_prune()
+    log_events(root)
     verb = f"archived to {dest}" if args.archive else "deleted"
     print(f"FINALIZED {session_rel()}/{FINAL_FILE}; {len(others)} other md file(s) {verb}: "
           f"{', '.join(f.name for f in others) or '-'}")
+
+
+# ---------------------------------------------------------------- chat view
+
+TYPING_WINDOW = 15  # seconds since an agent file changed that count as "typing"
+
+
+def describe(root):
+    """Session and agents as the chat page shows them (chat_view.py)."""
+    session = load_session(root) or {}
+    now = time.time()
+    agents = []
+    for name, a in session.get("agents", {}).items():
+        f = review_dir(root) / a["file"]
+        mtime = f.stat().st_mtime if f.exists() else 0
+        agents.append({"name": name, "file": a["file"], "prefix": a["prefix"], "mode": a.get("mode", "agent"),
+                       "left": bool(a.get("left")),
+                       "stale": bool(session) and is_active(session, now) and is_stale(root, session, name, now),
+                       "typing": is_active(session, now) and not a.get("left") and now - mtime < TYPING_WINDOW})
+    return {"session": {"name": SESSION, "goal": session.get("goal"), "start": session.get("start", now),
+                        "end": session.get("end", now), "interval": session.get("interval", 0),
+                        "order_mode": session.get("order_mode"), "work_mode": session.get("work_mode", "research"),
+                        "active": is_active(session, now), "ring": ring_text(session) if session else "-",
+                        "ring_version": session.get("ring_version", 0)},
+            "agents": agents}
+
+
+def cmd_chat(args):
+    import chat_view  # only the chat command needs the web server
+    root = args.root
+    if not load_session(root):
+        sys.exit(f"NO_SESSION in {Path(root).resolve()} (session '{SESSION}'); pass --root/--session")
+    log_events(root)
+    chat_view.serve(state_dir(root), lambda: describe(root), lambda: log_events(root), port=args.port,
+                    replay=args.replay, open_browser=not args.no_open)
 
 
 # ---------------------------------------------------------------- drive mode
@@ -1367,6 +1426,10 @@ def main():
     d.add_argument("--exec", required=True, help="shell command that reads the prompt on stdin, prints the answer")
     d.add_argument("--call-timeout", default="15m")
     d.add_argument("--max-chars", type=int, default=200000, help="prompt size cap (shrink for small local models)")
+    ch = sub.add_parser("chat", help="live chat view of the session in the browser (localhost only)")
+    ch.add_argument("--port", type=int, default=8777)
+    ch.add_argument("--replay", action="store_true", help="play a finished session back from its event log")
+    ch.add_argument("--no-open", action="store_true", help="do not open a browser")
     p.add_argument("--session", help=f"session name, to run several reviews at once (default: {DEFAULT_SESSION}; "
                                       "when joining: the single active one)")
     for sp in sub.choices.values():
@@ -1385,7 +1448,7 @@ def main():
         set_session(session)
     {"join": cmd_join, "wait": cmd_wait, "propose": cmd_propose, "shuffle": cmd_shuffle,
      "roster": cmd_roster, "status": cmd_status, "leave": cmd_leave, "stop": cmd_stop,
-     "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive}[args.cmd](args)
+     "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive, "chat": cmd_chat}[args.cmd](args)
 
 
 if __name__ == "__main__":

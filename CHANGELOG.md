@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `chat`: a live chat view of the session on `http://127.0.0.1:8777` (standard library web
+  server, localhost only, no external resources) in its own Edge app window that stops the server
+  when closed (default browser without Edge). `chat --replay` plays a finished session back.
+- Event log `.state/events.jsonl`: every `wait` tick, join, leave, ring change and `finalize`
+  appends new findings, verdicts, answers and withdrawals parsed from the agent files.
+  `finalize` keeps it; a new session archives the old one. A broken log never stops a review.
+- `install.py` also copies `scripts/chat_events.py` and `scripts/chat_view.py`.
+
 ## [0.4.1] - 2026-10-24
 
 ### Fixed

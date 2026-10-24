@@ -167,6 +167,13 @@ Give it this message (fill the path):
 Or add the same text to the project's `AGENTS.md` (read by Codex, Cursor,
 opencode, Copilot).
 
+## Watching (for the user)
+
+`python SCRIPT chat` opens a live chat view of the session on
+`http://127.0.0.1:8777` (`--replay` plays a finished one back). Agents need
+not do anything for it; start it with Bash `run_in_background: true` only if
+the user asks.
+
 ## Ending
 
 - User wants to stop everyone → `python SCRIPT stop`.

@@ -6,3 +6,6 @@ extend-exclude = ["multi-review"]
 [lint]
 select = ["E", "F", "W", "B", "I"]
 ignore = ["E731"]  # small lambdas are used on purpose (ring_text helpers, tests)
+
+[lint.per-file-ignores]
+"scripts/chat_view.py" = ["E501"]  # the embedded HTML/CSS/JS page keeps its own line lengths
