@@ -73,155 +73,176 @@ def open_window(url):
 
 
 class Server(ThreadingHTTPServer):
+    """The hub's HTTP server and its state. hub: sessions() -> [{"key", ...}], and per key:
+    state_dir, describe, sync, say, rename (say/rename may raise ValueError). Only keys that
+    sessions() lists are ever served, so a request cannot point it at an arbitrary folder."""
+
     # Windows' SO_REUSEADDR lets a second server bind a port that is in use; then two hubs would
     # share one port. Bind exclusively there, so a busy port fails and bind() moves to the next one.
     allow_reuse_address = os.name != "nt"
     daemon_threads = True  # open SSE streams must not block shutdown
+
+    def __init__(self, port, hub, initial=None, replay_first=False):
+        self.hub, self.initial, self.replay_first = hub, initial, replay_first
+        self.token = secrets.token_urlsafe(24)  # only the page knows it: other sites cannot post to the agents
+        self.alive = {"clients": 0, "ever": False, "last": time.time()}
+        self._last_sync, self._lock = {}, threading.Lock()
+        super().__init__(("127.0.0.1", port), Handler)
 
     def server_bind(self):
         if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
 
+    @property
+    def port(self):
+        return self.server_address[1]
 
-def make_server(hub, port=8777, initial=None, replay_first=False):
-    """hub: sessions() -> [{"key", ...}], and per key: state_dir(key), describe(key), sync(key),
-    say(key, text) (say may raise ValueError). Only keys that sessions() lists are ever served,
-    so a request cannot point the server at an arbitrary folder. Port 0 picks a free port."""
-    token = secrets.token_urlsafe(24)  # only this page knows it: other sites cannot post to the agents
-    last_sync, sync_lock = {}, threading.Lock()
-    alive = {"clients": 0, "ever": False, "last": time.time()}
-    alive_lock = threading.Lock()
+    def known(self, key):
+        return any(s["key"] == key for s in self.hub.sessions())
 
-    def known(key):
-        return any(s["key"] == key for s in hub.sessions())
-
-    def sync_due(key):
-        with sync_lock:
-            if time.time() - last_sync.get(key, 0) < SYNC_EVERY:
+    def sync_due(self, key):
+        """At most one sync per session every SYNC_EVERY seconds, however many polls arrive."""
+        with self._lock:
+            if time.time() - self._last_sync.get(key, 0) < SYNC_EVERY:
                 return False
-            last_sync[key] = time.time()
+            self._last_sync[key] = time.time()
             return True
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
+    def page_opened(self, delta):
+        with self._lock:
+            self.alive["clients"] += delta
+            self.alive["ever"] = True
+            if delta < 0:
+                self.alive["last"] = time.time()
 
-        def send(self, code, body, ctype="application/json; charset=utf-8"):
-            data = (body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy",
-                             "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-                             "connect-src 'self'")
-            self.end_headers()
-            self.wfile.write(data)
 
-        def host_ok(self):
-            # DNS rebinding: a page on another domain that resolves to 127.0.0.1 still sends its own Host.
-            port = self.server.server_address[1]
-            return self.headers.get("Host") in (f"127.0.0.1:{port}", f"localhost:{port}")
+class Handler(BaseHTTPRequestHandler):
+    WRITE_ROUTES = {"/api/say": "say", "/api/rename": "rename"}
 
-        def do_GET(self):  # noqa: N802 - http.server API
-            if not self.host_ok():
-                return self.send(403, {"error": "forbidden"})
-            url = urlparse(self.path)
-            q = parse_qs(url.query)
-            if url.path == "/":
-                page = (PAGE.replace("__TOKEN__", token)
-                        .replace("__INITIAL__", json.dumps(initial or ""))
-                        .replace("__REPLAY_FIRST__", "true" if replay_first else "false"))
-                self.send(200, page, "text/html; charset=utf-8")
-            elif url.path == "/api/ping":
-                self.send(200, {"app": APP_ID, "pid": os.getpid()})
-            elif url.path == "/api/alive":
-                self.keep_alive()
-            elif url.path == "/api/sessions":
-                self.send(200, {"sessions": hub.sessions(), "now": time.time()})
-            elif url.path == "/api/state":
-                key = q.get("s", [""])[0]
-                if not known(key):
-                    return self.send(404, {"error": "unknown session"})
-                try:
-                    since = max(0, int(q.get("since", ["0"])[0]))
-                except ValueError:
-                    since = 0
-                info = hub.describe(key)
-                state = hub.state_dir(key)
-                # A running session moves its log forward; a finished one from before the log existed
-                # gets one built once from what is left (session.json, final.md, any agent files).
-                fresh_log = not (Path(state) / chat_events.EVENTS_FILE).exists()
-                if (info["session"]["active"] or fresh_log) and sync_due(key):
-                    hub.sync(key)
-                events = chat_events.read_events(state, since)
-                self.send(200, dict(info, events=events, next=since + len(events), now=time.time()))
-            else:
-                self.send(404, {"error": "not found"})
+    def log_message(self, *args):
+        pass
 
-        def do_POST(self):  # noqa: N802 - http.server API
-            """Message box (/api/say) and session name (/api/rename). A message reaches AI agents as a
-            request from the user, so only this page may write: same Host and Origin (no DNS rebinding,
-            no cross-site form), JSON body (forces a CORS preflight that this server never answers) and
-            the per-run token."""
-            try:
-                size = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                size = -1
-            if not 0 < size <= SAY_MAX_BYTES:
-                self.close_connection = True
-                return self.send(413, {"error": "message too large"})
-            raw = self.rfile.read(size)  # read before any answer: an unread body resets the connection
-            action = {"/api/say": "say", "/api/rename": "rename"}.get(urlparse(self.path).path)
-            if not action:
-                return self.send(404, {"error": "not found"})
-            port = self.server.server_address[1]
-            ok = (self.host_ok() and self.headers.get("Origin") in (f"http://127.0.0.1:{port}",
-                                                                     f"http://localhost:{port}")
-                  and (self.headers.get("Content-Type") or "").startswith("application/json")
-                  and hmac.compare_digest(self.headers.get("X-MR-Token") or "", token))
-            if not ok:
-                return self.send(403, {"error": "forbidden"})
-            try:
-                body = json.loads(raw.decode("utf-8"))
-                key, text = body.get("s", ""), body.get("text", "")
-                if not known(key):
-                    return self.send(404, {"error": "unknown session"})
-                text = text if isinstance(text, str) else ""
-                if action == "rename":
-                    return self.send(200, {"ok": True, "title": hub.rename(key, text)})
-                msg = hub.say(key, text)
-            except (ValueError, AttributeError) as e:  # bad JSON, empty, too long, session over
-                return self.send(400, {"error": str(e)})
+    def send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = (body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                         "connect-src 'self'")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def host_ok(self):
+        # DNS rebinding: a page on another domain that resolves to 127.0.0.1 still sends its own Host.
+        return self.headers.get("Host") in (f"127.0.0.1:{self.server.port}", f"localhost:{self.server.port}")
+
+    # ---- reads
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        if not self.host_ok():
+            return self.send(403, {"error": "forbidden"})
+        url = urlparse(self.path)
+        route = {"/": self.get_page, "/api/ping": self.get_ping, "/api/alive": self.get_alive,
+                 "/api/sessions": self.get_sessions, "/api/state": self.get_state}.get(url.path)
+        if not route:
+            return self.send(404, {"error": "not found"})
+        route(parse_qs(url.query))
+
+    def get_page(self, q):
+        page = (PAGE.replace("__TOKEN__", self.server.token)
+                .replace("__INITIAL__", json.dumps(self.server.initial or ""))
+                .replace("__REPLAY_FIRST__", "true" if self.server.replay_first else "false"))
+        self.send(200, page, "text/html; charset=utf-8")
+
+    def get_ping(self, q):
+        self.send(200, {"app": APP_ID, "pid": os.getpid()})
+
+    def get_sessions(self, q):
+        self.send(200, {"sessions": self.server.hub.sessions(), "now": time.time()})
+
+    def get_state(self, q):
+        hub, key = self.server.hub, q.get("s", [""])[0]
+        if not self.server.known(key):
+            return self.send(404, {"error": "unknown session"})
+        try:
+            since = max(0, int(q.get("since", ["0"])[0]))
+        except ValueError:
+            since = 0
+        info, state = hub.describe(key), hub.state_dir(key)
+        # A running session moves its log forward; a finished one from before the log existed
+        # gets one built once from what is left (session.json, final.md, any agent files).
+        fresh_log = not (Path(state) / chat_events.EVENTS_FILE).exists()
+        if (info["session"]["active"] or fresh_log) and self.server.sync_due(key):
             hub.sync(key)
-            self.send(200, {"ok": True, "message": msg})
+        events = chat_events.read_events(state, since)
+        self.send(200, dict(info, events=events, next=since + len(events), now=time.time()))
 
-        def keep_alive(self):
-            """SSE stream the page keeps open; it ends when the window (or tab) is closed."""
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            with alive_lock:
-                alive["clients"] += 1
-                alive["ever"] = True
-            try:
-                while True:
-                    self.wfile.write(b": alive\n\n")
-                    self.wfile.flush()
-                    time.sleep(ALIVE_PING)
-            except OSError:
-                pass
-            finally:
-                with alive_lock:
-                    alive["clients"] -= 1
-                    alive["last"] = time.time()
+    def get_alive(self, q):
+        """SSE stream the page keeps open; it ends when the window (or tab) is closed."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.server.page_opened(+1)
+        try:
+            while True:
+                self.wfile.write(b": alive\n\n")
+                self.wfile.flush()
+                time.sleep(ALIVE_PING)
+        except OSError:
+            pass
+        finally:
+            self.server.page_opened(-1)
 
-    server = Server(("127.0.0.1", port), Handler)
-    server.alive = alive
-    return server
+    # ---- writes
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        """Message box (/api/say) and session name (/api/rename)."""
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            size = -1
+        if not 0 < size <= SAY_MAX_BYTES:
+            self.close_connection = True
+            return self.send(413, {"error": "message too large"})
+        raw = self.rfile.read(size)  # read before any answer: an unread body resets the connection
+        action = self.WRITE_ROUTES.get(urlparse(self.path).path)
+        if not action:
+            return self.send(404, {"error": "not found"})
+        if not self.write_allowed():
+            return self.send(403, {"error": "forbidden"})
+        hub = self.server.hub
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            key, text = body.get("s", ""), body.get("text", "")
+            if not self.server.known(key):
+                return self.send(404, {"error": "unknown session"})
+            text = text if isinstance(text, str) else ""
+            if action == "rename":
+                return self.send(200, {"ok": True, "title": hub.rename(key, text)})
+            msg = hub.say(key, text)
+        except (ValueError, AttributeError) as e:  # bad JSON, empty, too long, session over
+            return self.send(400, {"error": str(e)})
+        hub.sync(key)
+        self.send(200, {"ok": True, "message": msg})
+
+    def write_allowed(self):
+        """A message reaches AI agents as a request from the user, so only this page may write:
+        same Host and Origin (no DNS rebinding, no cross-site form), a JSON body (forces a CORS
+        preflight that this server never answers) and the per-run token."""
+        origins = (f"http://127.0.0.1:{self.server.port}", f"http://localhost:{self.server.port}")
+        return (self.host_ok() and self.headers.get("Origin") in origins
+                and (self.headers.get("Content-Type") or "").startswith("application/json")
+                and hmac.compare_digest(self.headers.get("X-MR-Token") or "", self.server.token))
+
+
+def make_server(hub, port=8777, initial=None, replay_first=False):
+    """Port 0 picks a free port."""
+    return Server(port, hub, initial, replay_first)
 
 
 def window_closed(alive, now=None):
