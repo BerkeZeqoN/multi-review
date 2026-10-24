@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- README opens with an animated review chat (`docs/agents-chat.gif`) and shows the real
+  `wait` output in a collapsible block.
+- README explains the verdict words: `KABUL` (accept), `RED` (reject), `KISMEN` (partly right).
+
 ## [0.4.1] - 2026-10-24
 
 ### Fixed

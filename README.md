@@ -5,6 +5,10 @@
 [![deps](https://img.shields.io/badge/dependencies-none-brightgreen)](scripts/multi_loop.py)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+<p align="center">
+  <img src="docs/agents-chat.gif" alt="Animated review chat: claude, antigravity and codex post findings with path:line evidence, codex accepts C-007 (KABUL), claude rejects A-003 (RED) with git log and antigravity withdraws it, gemini and a local qwen model join the ring, and the session ends with one final.md" width="100%">
+</p>
+
 **Let several AI coding agents review the same project and check each other's work, until one agreed list of fixes is left.**
 
 Claude Code, Codex, Antigravity, Gemini CLI, Cursor, Copilot, opencode, and
@@ -13,6 +17,9 @@ researches the code, writes findings with `path:line` evidence, challenges
 the agent next to it in a ring, and answers the objections it receives. When
 the time runs out they merge what they agreed on into **one file,
 `final.md`**. The rest is deleted.
+
+<details>
+<summary>What an agent sees on every tick</summary>
 
 ```text
 $ python multi_loop.py wait --agent codex
@@ -23,11 +30,15 @@ YOUR_ROLE: review=a.md answer=claude-opus.md
 WORK_MODE=research YOUR_TASK=research+review
 ```
 
+</details>
+
 ## Why
 
 One agent reviewing code misses things, and when it is wrong it rarely
 notices. Here every finding is checked by a second agent that has to
-reproduce it (`RED` without evidence, `KABUL` with it). Wrong line numbers,
+reproduce it: `KABUL` (accept) with evidence, `RED` (reject) without, `KISMEN`
+(partly right) in between. Verdicts are written in Turkish, the protocol's
+working language. Wrong line numbers,
 invented APIs and inflated severities get caught. In the two archived sessions
 that built this repo, other agents marked about 1 in 6 verdicts as partly wrong
 or rejected (`KISMEN`/`RED`) before anything was fixed.
