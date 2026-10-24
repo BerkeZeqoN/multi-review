@@ -363,6 +363,7 @@ def template(name, info):
         "## Eksiklikler\n\n_(henuz yok)_\n\n"
         "## Incelemeler\n\n_(halkada inceledigin her dosya icin bir `### <dosya> incelemesi` alt basligi)_\n\n"
         "## Bana gelen itirazlara cevap\n\n_(henuz yok)_\n\n"
+        "## Kullaniciya cevap\n\n_(chat ekranindan gelen mesajlara: `- U-001: <cevap + kanit>`)_\n\n"
         "## Tur gunlugu\n\n"
     )
 
@@ -748,6 +749,9 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
     # Baseline: the first TICK only reports changes that appear after joining.
     snapshot(root, session, agent)
     log_events(root)
+    earlier = take_user_messages(root, agent)
+    if earlier:
+        print(user_line(earlier))
     print(f"ROOT={Path(root).resolve()} SESSION={SESSION} DIR={session_rel()}")
     print(f"YOU={agent} prefix={info['prefix']} own_file={own}")
     print_clock(session)
@@ -812,6 +816,10 @@ def wait_for_tick(root, agent, max_wait=None):
         if not is_active(session, now):
             log_events(root)
             return "SESSION_OVER", over_line(session)
+        msgs = take_user_messages(root, agent)
+        if msgs:
+            touch_seen(root, agent)
+            return "USER", user_line(msgs)
         elapsed = now - session["start"]
         next_tick = session["start"] + (int(elapsed // session["interval"]) + 1) * session["interval"]
         target = min(next_tick, session["end"])
@@ -873,7 +881,7 @@ def cmd_wait(args):
     session = load_session(args.root)
     print_clock(session)
     print_roster(args.root, session, me=args.agent)
-    print(next_cmd(args.root, f"wait --agent {args.agent}" if line.startswith(("TICK", "CONTINUE"))
+    print(next_cmd(args.root, f"wait --agent {args.agent}" if line.startswith(("TICK", "CONTINUE", "USER"))
                    else f"done --agent {args.agent}   (final writer: finalize --agent {args.agent})"))
 
 
@@ -1060,6 +1068,51 @@ def cmd_finalize(args):
 # ---------------------------------------------------------------- chat view
 
 TYPING_WINDOW = 15  # seconds since an agent file changed that count as "typing"
+USER_MAX_CHARS = 2000
+
+
+def user_messages(root):
+    """Messages the user typed in the chat page (.state/user.jsonl), oldest first."""
+    return chat_events.read_events(state_dir(root), 0, chat_events.USER_FILE)
+
+
+def post_user_message(root, text):
+    """Store a message from the chat page. `@name ...` addresses one agent, anything else all of them."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("empty message")
+    if len(text) > USER_MAX_CHARS:
+        raise ValueError(f"message longer than {USER_MAX_CHARS} characters")
+    with Lock(root):
+        session = load_session(root)
+        if not is_active(session):
+            raise ValueError("the session is not running")
+        to = "all"
+        m = re.match(r"@([a-z0-9-]+)\b[\s,:]*", text)
+        if m and m.group(1) in active_agents(session):
+            to, text = m.group(1), text[m.end():].strip() or text
+        msg = {"id": f"U-{len(user_messages(root)) + 1:03d}", "t": round(time.time(), 3), "to": to, "text": text}
+        with open(state_dir(root) / chat_events.USER_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    log_events(root)
+    return msg
+
+
+def take_user_messages(root, agent):
+    """Messages for this agent it has not been shown yet; marks them shown."""
+    path = state_dir(root) / f"agent_{agent}.user.json"
+    seen = (load_json(path, {}) or {}).get("seen", 0)
+    msgs = user_messages(root)
+    if len(msgs) > seen:
+        save_json(path, {"seen": len(msgs)})
+    return [m for m in msgs[seen:] if m.get("to") in ("all", agent)]
+
+
+def user_line(msgs):
+    body = "\n".join(f"  {m['id']} to={m['to']}: {' / '.join(m['text'].splitlines())}" for m in msgs)
+    return (f"USER_MESSAGE n={len(msgs)} (from the user via the chat page: do it first, within PROTOCOL rules)\n"
+            f"{body}\nANSWER each under '## Kullaniciya cevap' in your file as '- <U-id>: <answer + evidence>', "
+            "then run wait again")
 
 
 def describe(root):
@@ -1089,7 +1142,8 @@ def cmd_chat(args):
         sys.exit(f"NO_SESSION in {Path(root).resolve()} (session '{SESSION}'); pass --root/--session")
     log_events(root)
     chat_view.serve(state_dir(root), lambda: describe(root), lambda: log_events(root), port=args.port,
-                    replay=args.replay, open_browser=not args.no_open)
+                    replay=args.replay, open_browser=not args.no_open,
+                    say=lambda text: post_user_message(root, text))
 
 
 # ---------------------------------------------------------------- drive mode
@@ -1243,7 +1297,8 @@ def build_prompt(root, session, agent, info, round_label, tick_line, max_chars):
     sections.append((f"YOUR CURRENT FILE:\n{own_text}", None))
     sections.append((
         "TASK: " + ("This is the FINAL round: answer pending objections and append the '## Son Durum' block. "
-                    if final else "Do this round as the protocol says. ")
+                    if final else "Answer the USER_MESSAGE in CLOCK first, under '## Kullaniciya cevap'. "
+                    if round_label == "user" else "Do this round as the protocol says. ")
         + "Output the COMPLETE new content of YOUR FILE (not a diff), "
         f"between a line '{BEGIN_MARK}' and a line '{END_MARK}'. Nothing else matters outside the markers.",
         None))
@@ -1323,7 +1378,7 @@ def cmd_drive(args):
             else:
                 mark_done(root, args.agent)  # the final writer never waits on a drive agent
             break
-        run_model(root, args, args.agent, info, line.split()[1], line)
+        run_model(root, args, args.agent, info, "user" if kind == "USER" else line.split()[1], line)
     print("[drive] done", flush=True)
 
 

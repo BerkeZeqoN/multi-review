@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -167,6 +168,105 @@ class Sync(unittest.TestCase):
             self.assertEqual({a["name"] for a in state["agents"]}, {"claude", "antigravity"})
             with urllib.request.urlopen(base + f"/api/state?since={state['next']}") as r:
                 self.assertEqual(json.loads(r.read().decode("utf-8"))["events"], [])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class UserMessages(Sync):
+    """The chat page's message box: stored, addressed, delivered by `wait`, answered in the agent file."""
+
+    def test_addressing(self):
+        self.assertEqual(m.post_user_message(self.root, "check the installer")["to"], "all")
+        msg = m.post_user_message(self.root, "@antigravity: run the tests")
+        self.assertEqual((msg["id"], msg["to"], msg["text"]), ("U-002", "antigravity", "run the tests"))
+        self.assertEqual(m.post_user_message(self.root, "@nobody hi")["to"], "all")
+        for bad in ("   ", "x" * (m.USER_MAX_CHARS + 1)):
+            with self.assertRaises(ValueError):
+                m.post_user_message(self.root, bad)
+
+    def test_wait_returns_early_and_only_once(self):
+        m.post_user_message(self.root, "@claude only for claude")
+        m.post_user_message(self.root, "for everyone")
+        kind, line = m.wait_for_tick(self.root, "antigravity", max_wait=60)
+        self.assertEqual(kind, "USER")
+        self.assertIn("U-002 to=all: for everyone", line)
+        self.assertNotIn("U-001", line)
+        self.assertIn("## Kullaniciya cevap", line)
+        self.assertEqual(m.take_user_messages(self.root, "antigravity"), [])  # shown once
+        self.assertEqual([x["id"] for x in m.take_user_messages(self.root, "claude")], ["U-001", "U-002"])
+
+    def test_late_joiner_sees_earlier_messages(self):
+        m.post_user_message(self.root, "focus on security")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            m.do_join(self.root, "codex")
+        self.assertIn("U-001 to=all: focus on security", out.getvalue())
+
+    def test_stopped_session_takes_no_messages(self):
+        quiet(m.cmd_stop, argparse.Namespace(root=self.root))
+        with self.assertRaises(ValueError):
+            m.post_user_message(self.root, "hello?")
+
+    def test_message_and_reply_become_chat_events(self):
+        m.post_user_message(self.root, "is the lock safe?")
+        self.write("claude-opus.md", "## Kullaniciya cevap\n- U-001: yes, `os.open` + O_EXCL (`multi_loop.py:300`)\n")
+        m.log_events(self.root)
+        user = [e for e in self.events() if e["kind"] == "user"]
+        reply = [e for e in self.events() if e["kind"] == "reply"]
+        self.assertEqual((user[0]["id"], user[0]["text"]), ("U-001", "is the lock safe?"))
+        self.assertEqual((reply[0]["agent"], reply[0]["id"]), ("claude", "U-001"))
+        self.assertTrue(reply[0]["text"].startswith("yes"))
+
+    def test_template_has_the_reply_section(self):
+        text = (m.review_dir(self.root) / "claude-opus.md").read_text(encoding="utf-8")
+        self.assertIn("## Kullaniciya cevap", text)
+
+    def post(self, server, body, **headers):
+        port = server.server_address[1]
+        h = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"}
+        h.update(headers)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/say", data=json.dumps(body).encode(),
+                                     headers={k: v for k, v in h.items() if v is not None}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            e.close()
+            return e.code
+
+    def test_say_endpoint_needs_this_page(self):
+        server = cv.make_server(m.state_dir(self.root), lambda: m.describe(self.root), lambda: m.log_events(self.root),
+                                port=0, say=lambda text: m.post_user_message(self.root, text))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/") as r:
+                page = r.read().decode("utf-8")
+            token = page.split('TOKEN = "')[1].split('"')[0]
+            self.assertIn("CAN_SAY = true", page)
+            self.assertEqual(self.post(server, {"text": "x"}), 403)                                   # no token
+            self.assertEqual(self.post(server, {"text": "x"}, **{"X-MR-Token": "guess"}), 403)        # wrong token
+            self.assertEqual(self.post(server, {"text": "x"}, Origin="http://evil.example",
+                                       **{"X-MR-Token": token}), 403)                                 # other site
+            self.assertEqual(self.post(server, {"text": "x"}, **{"X-MR-Token": token,
+                                                                 "Content-Type": "text/plain"}), 403)  # simple POST
+            self.assertEqual(m.user_messages(self.root), [])
+            self.assertEqual(self.post(server, {"text": "  "}, **{"X-MR-Token": token}), 400)
+            self.assertEqual(self.post(server, {"text": "@claude look at install.py"}, **{"X-MR-Token": token}), 200)
+            self.assertEqual(m.user_messages(self.root)[0]["to"], "claude")
+            self.assertIn("user", [e["kind"] for e in self.events()])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_replay_page_is_read_only(self):
+        server = cv.make_server(m.state_dir(self.root), lambda: m.describe(self.root), lambda: None, port=0,
+                                replay=True, say=lambda text: m.post_user_message(self.root, text))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/") as r:
+                self.assertIn("CAN_SAY = false", r.read().decode("utf-8"))
+            self.assertEqual(self.post(server, {"text": "x"}, **{"X-MR-Token": "x"}), 404)
         finally:
             server.shutdown()
             server.server_close()

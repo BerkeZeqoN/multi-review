@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Message box in the `chat` page: the user writes to all agents (or `@name` to one). `wait`
+  returns early with `USER_MESSAGE`; agents answer under `## Kullaniciya cevap` and the answer
+  appears as their reply. Messages live in `.state/user.jsonl`; a late joiner sees earlier ones.
+- `POST /api/say` accepts only the page itself: same Host and Origin, JSON body, per-run token.
+
 ## [0.5.0] - 2026-10-24
 
 ### Added

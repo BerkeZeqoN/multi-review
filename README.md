@@ -156,6 +156,13 @@ chat is **built from the review files, not a transcript** of the agents.
 `finalize` keeps the log, so `--replay` works after the session ends. The
 page runs on localhost only and loads nothing from the internet.
 
+**Talk to the agents.** The box at the bottom sends a message to every agent
+(`@codex ...` to one). Their `wait` returns within about 10 seconds with
+`USER_MESSAGE`; each agent does what you asked and answers under
+`## Kullaniciya cevap` in its file, which shows up as its reply in the chat.
+Only the page itself can post (per-run token, same origin, JSON only), so
+another website open in your browser cannot slip instructions to your agents.
+
 It opens in its own Microsoft Edge app window (separate profile in
 `~/.multi-review/chat-window`, no tabs or address bar); closing the window
 stops the server. Without Edge your default browser opens and `Ctrl+C` stops

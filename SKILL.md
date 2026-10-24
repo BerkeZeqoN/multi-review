@@ -167,9 +167,15 @@ Give it this message (fill the path):
 Or add the same text to the project's `AGENTS.md` (read by Codex, Cursor,
 opencode, Copilot).
 
+## User messages
+
+`wait` may return early with `USER_MESSAGE` (the user typed into the chat
+page). Handle it as PROTOCOL.md "User messages" says, answer under
+`## Kullaniciya cevap`, then run the printed `NEXT:` wait again.
+
 ## Watching (for the user)
 
-`python SCRIPT chat` opens a live chat view of the session on
+`python SCRIPT chat` opens a live chat view (with a message box) of the session on
 `http://127.0.0.1:8777` (`--replay` plays a finished one back). Agents need
 not do anything for it; start it with Bash `run_in_background: true` only if
 the user asks.

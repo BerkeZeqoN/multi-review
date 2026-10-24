@@ -29,13 +29,15 @@ SEEN_FILE = "events.seen.json"
 LOCK_FILE = "events.lock"
 LOCK_STALE = 30          # seconds; a crashed syncer must not block the log forever
 TEXT_CAP = 280
-ORDER = ["session", "join", "leave", "ring", "finding", "verdict", "answer", "withdraw", "final_phase", "final",
-         "stopped"]
+ORDER = ["session", "join", "leave", "ring", "user", "reply", "finding", "verdict", "answer", "withdraw",
+         "final_phase", "final", "stopped"]
 
 ID_RE = re.compile(r"\b([A-Z][A-Z0-9]{0,3}-\d{1,4})\b")
 VERDICT_RE = re.compile(r"\b(KABUL|RED|KISMEN)\b")
 STRIKE_RE = re.compile(r"~~\s*([A-Z][A-Z0-9]{0,3}-\d{1,4})\s*~~")
 FINAL_ITEM_RE = re.compile(r"^###\s+(F-\d+)\s*(?:\[([^\]]+)\])?\s*(.*)$", re.M)
+USER_REPLY_RE = re.compile(r"^\s*[-*]\s*\**\s*(U-\d+)\s*\**\s*[:.\-—]+\s*(.+)$")
+USER_FILE = "user.jsonl"  # written by multi_loop.post_user_message (the chat page's message box)
 
 
 def _clean(text):
@@ -52,6 +54,8 @@ def _section(heading):
         return "reviews"
     if "bana gelen" in h:
         return "answers"
+    if "kullaniciya" in h or "kullanıcıya" in h:
+        return "user"
     return "other"
 
 
@@ -82,6 +86,12 @@ def parse_agent_file(text, prefix):
             if own.match(sid):
                 rest = line.split("~~", 2)[-1]
                 items[f"withdraw:{sid}"] = {"kind": "withdraw", "id": sid, "text": _clean(rest.strip(" :-()"))}
+        if section == "user":
+            m = USER_REPLY_RE.match(line)
+            if m:
+                # One reply per message; editing it later updates nothing (the first answer stays in the log).
+                items[f"reply:{m.group(1)}"] = {"kind": "reply", "id": m.group(1), "text": _clean(m.group(2))}
+            continue
         if section not in ("reviews", "answers") or not line.lstrip().startswith(("-", "*")):
             continue
         mid = ID_RE.search(line)
@@ -210,6 +220,9 @@ def sync(state, review, session, final_name="final.md", now=None):
                 presence[name] = state_now
         add(f"ring:{session.get('ring_version')}", {"kind": "ring", "ring": ring_text(session),
                                                     "version": session.get("ring_version")})
+        for msg in read_events(state, 0, USER_FILE):
+            add(f"user:{msg.get('id')}", {"kind": "user", "id": msg.get("id"), "to": msg.get("to", "all"),
+                                          "text": _clean(str(msg.get("text", "")))}, msg.get("t"))
         for name, a in agents.items():
             f = review / a["file"]
             try:
@@ -239,9 +252,9 @@ def sync(state, review, session, final_name="final.md", now=None):
         return len(new)
 
 
-def read_events(state, since=0):
-    """Events from index `since` on; a line still being written is skipped until it is complete."""
-    path = Path(state) / EVENTS_FILE
+def read_events(state, since=0, name=EVENTS_FILE):
+    """Lines of a .jsonl log from index `since` on; a line still being written is skipped until complete."""
+    path = Path(state) / name
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -258,7 +271,7 @@ def read_events(state, since=0):
 def reset(state, archive_dir=None):
     """A new session starts with an empty log; the old one moves next to the archived md files."""
     state = Path(state)
-    for name in (EVENTS_FILE, SEEN_FILE):
+    for name in (EVENTS_FILE, SEEN_FILE, USER_FILE):
         f = state / name
         if not f.exists():
             continue

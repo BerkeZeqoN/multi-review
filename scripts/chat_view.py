@@ -12,8 +12,10 @@ to /api/alive; once the window is closed and no page has been connected for
 WINDOW_GRACE seconds, the server stops. Without Edge the default browser
 opens instead and the server runs until Ctrl+C.
 """
+import hmac
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import threading
@@ -26,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 import chat_events
 
 SYNC_EVERY = 2.0
+SAY_MAX_BYTES = 16384
 WINDOW_GRACE = 8          # seconds without a connected page before an Edge-window server stops
 ALIVE_PING = 2            # SSE keep-alive interval; a closed window is noticed on the next write
 WINDOW_PROFILE = Path.home() / ".multi-review" / "chat-window"
@@ -59,9 +62,11 @@ def open_window(url):
         return None
 
 
-def make_server(state, describe, sync, port=8777, replay=False):
+def make_server(state, describe, sync, port=8777, replay=False, say=None):
     """state: the session's .state folder; describe(): session + agents dict for the page;
-    sync(): moves the event log forward (live mode only). Port 0 picks a free port."""
+    sync(): moves the event log forward (live mode only); say(text): stores a message the user typed
+    (None = read-only page). Port 0 picks a free port."""
+    token = secrets.token_urlsafe(24)  # only this page knows it: other sites cannot post to the agents
     last_sync = [0.0]
     sync_lock = threading.Lock()
     alive = {"clients": 0, "ever": False, "last": time.time()}
@@ -87,7 +92,9 @@ def make_server(state, describe, sync, port=8777, replay=False):
         def do_GET(self):  # noqa: N802 - http.server API
             url = urlparse(self.path)
             if url.path == "/":
-                self.send(200, PAGE.replace("__REPLAY__", "true" if replay else "false"), "text/html; charset=utf-8")
+                page = PAGE.replace("__REPLAY__", "true" if replay else "false")
+                page = page.replace("__CAN_SAY__", "true" if say and not replay else "false").replace("__TOKEN__", token)
+                self.send(200, page, "text/html; charset=utf-8")
             elif url.path == "/api/alive":
                 self.keep_alive()
             elif url.path == "/api/state":
@@ -105,6 +112,33 @@ def make_server(state, describe, sync, port=8777, replay=False):
                 self.send(200, json.dumps(body, ensure_ascii=False), "application/json; charset=utf-8")
             else:
                 self.send(404, "not found", "text/plain; charset=utf-8")
+
+        def do_POST(self):  # noqa: N802 - http.server API
+            """The message box. A message reaches AI agents as a request from the user, so only this
+            page may send one: same Host and Origin (no DNS rebinding, no cross-site form), JSON body
+            (forces a CORS preflight that this server never answers) and the per-run token."""
+            here = f"127.0.0.1:{self.server.server_address[1]}"
+            if urlparse(self.path).path != "/api/say" or not say or replay:
+                return self.send(404, "not found", "text/plain; charset=utf-8")
+            ok = (self.headers.get("Host") == here and self.headers.get("Origin") == f"http://{here}"
+                  and (self.headers.get("Content-Type") or "").startswith("application/json")
+                  and hmac.compare_digest(self.headers.get("X-MR-Token") or "", token))
+            if not ok:
+                return self.send(403, json.dumps({"error": "forbidden"}), "application/json; charset=utf-8")
+            try:
+                size = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                size = -1
+            if not 0 < size <= SAY_MAX_BYTES:
+                return self.send(413, json.dumps({"error": "message too large"}), "application/json; charset=utf-8")
+            try:
+                text = json.loads(self.rfile.read(size).decode("utf-8")).get("text", "")
+                msg = say(text if isinstance(text, str) else "")
+            except (ValueError, AttributeError) as e:  # bad JSON, empty, too long, session over
+                return self.send(400, json.dumps({"error": str(e)}), "application/json; charset=utf-8")
+            sync()
+            self.send(200, json.dumps({"ok": True, "message": msg}, ensure_ascii=False),
+                      "application/json; charset=utf-8")
 
         def keep_alive(self):
             """SSE stream the page keeps open; it ends when the window (or tab) is closed."""
@@ -139,8 +173,8 @@ def window_closed(alive, now=None):
     return alive["ever"] and alive["clients"] <= 0 and now - alive["last"] > WINDOW_GRACE
 
 
-def serve(state, describe, sync, port=8777, replay=False, open_browser=True):
-    server = make_server(state, describe, sync, port, replay)
+def serve(state, describe, sync, port=8777, replay=False, open_browser=True, say=None):
+    server = make_server(state, describe, sync, port, replay, say)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     proc = open_window(url) if open_browser else None
@@ -225,6 +259,16 @@ PAGE = r"""<!doctype html>
   .typing .dots { background: var(--panel); border: 1px solid var(--line); border-radius: 4px 12px 12px 12px; padding: 11px 14px; display: flex; gap: 5px; }
   .typing .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
   .typing .dots i:nth-child(2) { animation-delay: .2s; } .typing .dots i:nth-child(3) { animation-delay: .4s; }
+  .msg.you { flex-direction: row-reverse; }
+  .msg.you .bubble { background: #1d2a22; border-color: #2f4a38; border-radius: 12px 4px 12px 12px; }
+  .msg.you .av { background: var(--ok); }
+  .compose { display: flex; gap: 10px; padding: 12px 22px 16px; border-top: 1px solid var(--line); background: var(--side); align-items: flex-end; }
+  .compose .col { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .compose textarea { resize: none; min-height: 42px; max-height: 160px; font: 14px/1.4 var(--sans); color: var(--paper); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .compose textarea:focus { outline: 2px solid var(--ok); outline-offset: -1px; }
+  .compose button { padding: 10px 16px; font-size: 13px; background: var(--ok); color: var(--ink); border: 0; font-weight: 600; }
+  .compose button:disabled, .compose textarea:disabled { opacity: .5; cursor: default; }
+  .compose .hint { font: 11px var(--mono); color: var(--muted); }
   .empty { margin: auto; color: var(--muted); font: 12.5px var(--mono); text-align: center; }
   button { font: 12px var(--mono); color: var(--paper); background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
   @keyframes in { from { opacity: 0; transform: translateY(6px); } }
@@ -251,11 +295,18 @@ PAGE = r"""<!doctype html>
     <header><span><b id="title">#review</b> &nbsp;every finding needs path:line</span><span><span class="clock" id="clock"></span> <button id="restart" hidden>replay again</button></span></header>
     <div class="note">Built from the agents' review files, not a transcript of what they said.</div>
     <div class="feed" id="feed"><div class="empty" id="empty">waiting for the first event…</div></div>
+    <form class="compose" id="compose" hidden>
+      <div class="col">
+        <textarea id="say" rows="1" maxlength="2000" placeholder="Message the agents… (@codex to address one)" aria-label="Message the agents"></textarea>
+        <span class="hint" id="hint">Enter sends · Shift+Enter new line · agents pick it up within ~10 s and answer in their file</span>
+      </div>
+      <button type="submit" id="send">Send</button>
+    </form>
   </main>
 </div>
 <script>
 "use strict";
-const REPLAY = __REPLAY__;
+const REPLAY = __REPLAY__, CAN_SAY = __CAN_SAY__, TOKEN = "__TOKEN__";
 const KNOWN = { claude: "#e8a87c", antigravity: "#8ab4f8", codex: "#c6c1b5", gemini: "#b39ddb", cursor: "#f48fb1",
                 copilot: "#90caf9", opencode: "#a5d6a7", qwen: "#7fd1c7" };
 const PALETTE = ["#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#a3be8c", "#88c0d0", "#d08770", "#b48ead"];
@@ -314,6 +365,13 @@ function render(e) {
       if (e.note) txt.append(`(${e.note}) `); rich(txt, e.text);
       if (e.target) txt.appendChild(el("span", "where", "reviewing " + e.target));
       return message(e, txt);
+    case "user": {
+      const m = el("div", "msg you"), b = el("div", "bubble"), who = el("div", "who", "you");
+      who.style.color = "var(--ok)"; who.appendChild(el("i", null, `${e.id} → ${e.to === "all" ? "all agents" : "@" + e.to} · ${hhmm(e.t)}`));
+      b.append(who, rich(el("div", "txt"), e.text)); m.append(el("div", "av", "YOU"), b); return m;
+    }
+    case "reply":
+      txt.appendChild(el("span", "id", "↪ " + e.id + " ")); rich(txt, e.text); return message(e, txt);
     case "answer":
       txt.appendChild(el("span", "id", e.id));
       if (e.objection) txt.append(` ${e.objection}${e.by ? " by " + e.by : ""} → `);
@@ -377,6 +435,28 @@ async function play() {
   playing = false; document.getElementById("restart").hidden = false;
 }
 document.getElementById("restart").onclick = () => { feed.replaceChildren(); seenAgents.clear(); shown = 0; cursor = 0; queue = []; document.getElementById("restart").hidden = true; poll(); };
+const form = document.getElementById("compose"), box = document.getElementById("say"), sendBtn = document.getElementById("send");
+async function send() {
+  const text = box.value.trim(); if (!text) return;
+  sendBtn.disabled = true;
+  try {
+    const r = await fetch("/api/say", { method: "POST", headers: { "Content-Type": "application/json", "X-MR-Token": TOKEN }, body: JSON.stringify({ text }) });
+    const out = await r.json();
+    if (!r.ok) throw new Error(out.error || r.status);
+    box.value = ""; box.style.height = "auto";
+    document.getElementById("hint").textContent = `${out.message.id} sent to ${out.message.to === "all" ? "all agents" : "@" + out.message.to} · waiting for answers`;
+    feed.scrollTop = feed.scrollHeight; poll();
+  } catch (err) { document.getElementById("hint").textContent = "not sent: " + err.message; }
+  sendBtn.disabled = false; box.focus();
+}
+form.onsubmit = (ev) => { ev.preventDefault(); send(); };
+box.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); } });
+box.addEventListener("input", () => { box.style.height = "auto"; box.style.height = Math.min(box.scrollHeight, 160) + "px"; });
+form.hidden = !CAN_SAY;
+setInterval(() => {
+  if (!state || !CAN_SAY || state.session.active) return;
+  box.disabled = sendBtn.disabled = true; box.placeholder = "The session is over.";
+}, 1000);
 poll(); if (!REPLAY) setInterval(poll, 2000);
 new EventSource("/api/alive");  // keeps the server up while this window is open
 </script>
