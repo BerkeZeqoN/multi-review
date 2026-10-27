@@ -177,6 +177,18 @@ python SCRIPT drive --agent opus  --exec "claude -p"
 python SCRIPT drive --agent llm   --exec "llm -m gpt-4o"
 ```
 
+**Free models that run out mid-session:** put `scripts/model_rotate.py` in
+front. It runs each round on the model that answered last and moves to the
+next one when a model fails (quota / rate limit: skipped 1h, other errors:
+5m); every switch shows up as `MODEL_SWITCH old -> new` in the driver output
+and the agent's `Tur gunlugu`. `--models free` = every `opencode/*-free`
+model; or list them (`--models a,b,c`); `--cmd` changes the CLI (default
+`opencode run -m {model}`, which reads files in ROOT itself):
+
+```bash
+python SCRIPT drive --agent opencode-free --call-timeout 40m --exec "python SKILL_DIR/scripts/model_rotate.py --models free"
+```
+
 Any command that reads stdin and prints text works. Invalid output is logged in
 the agent's `Tur gunlugu` and saved raw under `.state/backup/`; the previous
 file version is backed up every round. Prefer agentic headless modes

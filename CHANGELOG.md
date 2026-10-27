@@ -9,12 +9,19 @@ All notable changes to this project are documented here. The format follows
 ## [0.7.0] - 2026-10-27
 
 ### Added
+- `scripts/model_rotate.py`: put it in front of a `drive` command and a review keeps running on free
+  models: each round goes to the model that answered last, a model that fails is skipped (quota or
+  rate limit: 1h, other errors: 5m) and the next one answers. `--models free` takes every
+  `opencode/*-free` model; switches appear as `MODEL_SWITCH` in the driver output and `Tur gunlugu`.
 - `open-ide antigravity` (and `join --open-ide antigravity` when creating) opens Antigravity on the
   session's project folder, so its agent works inside its workspace and the IDE stops asking for
   permission on every write of the loop. Antigravity joining from another folder gets
   `WORKSPACE_OUTSIDE_ROOT` with that command.
 
 ### Fixed
+- opencode did not know `/multi-review`: it makes slash commands only from
+  `~/.config/opencode/commands/`. `install.py` now installs `/multi-review` and
+  `/multi-review-join` there; the skill itself stays the shared `~/.agents` copy.
 - A session created by a sandboxed agent (Antigravity, Codex) no longer stays invisible: the next
   agent that joins and may write the machine-wide files registers it and opens the chat panel if no
   agent could. Sandboxed joiners still write nothing outside the project.

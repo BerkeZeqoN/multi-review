@@ -1501,6 +1501,14 @@ def extract_file(output, required="## Eksiklikler"):
     return body if required in body else None
 
 
+def model_switches(round_label, stderr):
+    """model_rotate.py reports a used-up model as MODEL_SWITCH on stderr: show it, return log lines."""
+    lines = [line for line in stderr.splitlines() if line.startswith(("MODEL_SWITCH", "MODEL_ROTATE_FAILED"))]
+    for line in lines:
+        print(f"[drive] round {round_label}: {line}", flush=True)
+    return "".join(f"- Tur {round_label} ({stamp(time.time())}): {line[:300]}\n" for line in lines)
+
+
 def run_model(root, args, agent, info, round_label, tick_line):
     session = load_session(root)
     prompt = build_prompt(root, session, agent, info, round_label, tick_line, args.max_chars)
@@ -1513,18 +1521,20 @@ def run_model(root, args, agent, info, round_label, tick_line):
                              encoding="utf-8", errors="replace", timeout=parse_duration(args.call_timeout),
                              cwd=Path(root).resolve())
         output, err = res.stdout, (res.stderr or "")[-500:]
+        switches = model_switches(round_label, res.stderr or "")
     except subprocess.TimeoutExpired:
-        output, err = "", "call timed out"
+        output, err, switches = "", "call timed out", ""
     body = extract_file(output)
     if body is None:
         with own.open("a", encoding="utf-8") as f:
+            f.write(switches)
             f.write(f"- Tur {round_label} ({stamp(time.time())}): HATA - model gecerli dosya dondurmedi"
                     f"{' (' + err.strip().splitlines()[-1] + ')' if err.strip() else ''}\n")
         (backup / f"{agent}-{round_label}-raw.txt").write_text(output, encoding="utf-8")
         print(f"[drive] round {round_label}: invalid output, raw saved to {backup}", flush=True)
         return
     (backup / f"{agent}-{round_label}.md").write_text(own.read_text(encoding="utf-8"), encoding="utf-8")
-    own.write_text(body + "\n", encoding="utf-8")
+    own.write_text(body + "\n" + switches, encoding="utf-8")
     print(f"[drive] round {round_label}: wrote {own}", flush=True)
 
 

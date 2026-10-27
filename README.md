@@ -112,6 +112,9 @@ python install.py --uninstall
 | Codex CLI | `~/.codex/skills/multi-review/` |
 | Cursor, opencode, others | `~/.agents/skills/multi-review/` |
 
+opencode only makes slash commands from `~/.config/opencode/commands/`, so the
+installer also puts `/multi-review` and `/multi-review-join` there.
+
 Only `SKILL.md`, `PROTOCOL.md` and `scripts/` are copied. An update backs up
 the previous copy to `~/.multi-review/backups/`. Update with `git pull &&
 python install.py`. Requires Python 3.8+ and nothing else.
@@ -135,6 +138,7 @@ python install.py`. Requires Python 3.8+ and nothing else.
 | `python $S done --agent codex` | after `SESSION_OVER`: your final round is done |
 | `python $S finalize --agent claude` | final writer: keep `final.md`, delete the rest (add `--archive` to move them to `.state/archive/` instead) |
 | `python $S drive --agent qwen --exec "ollama run qwen2.5-coder:7b" --max-chars 60000` | run a text-only model through the whole loop |
+| `python $S drive --agent opencode-free --call-timeout 40m --exec "python <skill>/scripts/model_rotate.py --models free"` | free opencode models; switches to the next one when a model runs out of quota (`MODEL_SWITCH`) |
 | `python $S open-ide antigravity` | open the project folder in Antigravity, so its agent joins without a write prompt per tick (`join --open-ide antigravity` does it when creating) |
 | `python $S chat` | watch the session as a live chat in your browser (`127.0.0.1:8777`) |
 | `python $S chat --replay` | play a finished session back |

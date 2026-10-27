@@ -20,13 +20,16 @@ from pathlib import Path
 NAME = "multi-review"
 REPO = Path(__file__).resolve().parent
 FILES = ["SKILL.md", "PROTOCOL.md", "scripts/multi_loop.py", "scripts/chat_events.py", "scripts/chat_view.py",
-         "scripts/chat_hub.py", "scripts/chat_page.html", "scripts/ide_open.py"]
+         "scripts/chat_hub.py", "scripts/chat_page.html", "scripts/ide_open.py", "scripts/model_rotate.py"]
 # Thin slash-command routers (the rules stay in SKILL.md/PROTOCOL.md), only for tools that load them.
-COMMANDS = {"claude": ["commands/multi-review-join.md"]}
+# opencode makes slash commands only from ~/.config/opencode/commands; skills it reads from ~/.agents.
+COMMANDS = {"claude": ["commands/multi-review-join.md"],
+            "opencode": ["commands/opencode/multi-review.md", "commands/multi-review-join.md"]}
 
 
 def command_dir(tool):
-    return {"claude": HOME / ".claude" / "commands"}.get(tool)
+    return {"claude": HOME / ".claude" / "commands",
+            "opencode": HOME / ".config" / "opencode" / "commands"}.get(tool)
 HOME = Path.home()
 # tool -> (folder that proves the tool is installed, skill directory)
 TOOLS = {
@@ -34,6 +37,8 @@ TOOLS = {
     "antigravity": (HOME / ".gemini", HOME / ".gemini" / "config" / "skills" / NAME),
     "codex": (HOME / ".codex", HOME / ".codex" / "skills" / NAME),
     "agents": (HOME / ".agents", HOME / ".agents" / "skills" / NAME),
+    # opencode loads skills from ~/.agents/skills: same copy as "agents", plus its own slash commands.
+    "opencode": (HOME / ".config" / "opencode", HOME / ".agents" / "skills" / NAME),
 }
 
 
@@ -98,6 +103,8 @@ def uninstall(tool, dest, dry):
             print(f"{tool:<12} {'remove command':<24} {target}")
             if not dry:
                 target.unlink()
+    if dest is None:
+        return  # shared skill folder, already removed for another tool
     if not dest.exists():
         print(f"{tool:<12} {'not installed':<24} {dest}")
         return
@@ -125,13 +132,19 @@ def main():
         return
     tools = selected(args.target)
     if not tools:
-        sys.exit("No supported tool found (~/.claude, ~/.gemini, ~/.codex, ~/.agents). Use --target to force one.")
+        sys.exit("No supported tool found (~/.claude, ~/.gemini, ~/.codex, ~/.agents, ~/.config/opencode). "
+                 "Use --target to force one.")
+    done = set()  # tools that share a skill folder (agents, opencode) touch it once
     for tool, (_, dest) in tools.items():
         if args.uninstall:
-            uninstall(tool, dest, args.dry_run)
+            uninstall(tool, dest if dest not in done else None, args.dry_run)
+        elif dest in done:
+            print(f"{tool:<12} {'shared':<24} {dest}")
+            install_commands(tool, args.dry_run)
         else:
             install(tool, dest, args.dry_run)
             install_commands(tool, args.dry_run)
+        done.add(dest)
     if args.dry_run:
         print("(dry run, nothing changed)")
 

@@ -48,6 +48,20 @@ class Installer(unittest.TestCase):
         self.run_main("--uninstall")
         self.assertFalse(cmd.exists())
 
+    def test_opencode_gets_slash_commands_and_shares_the_agents_skill(self):
+        shared = self.home / ".agents" / "skills" / install.NAME
+        (self.home / ".config" / "opencode").mkdir(parents=True)
+        install.TOOLS = {"agents": (self.home / ".agents", shared),
+                         "opencode": (self.home / ".config" / "opencode", shared)}
+        self.run_main()
+        cmds = self.home / ".config" / "opencode" / "commands"
+        self.assertEqual(sorted(p.name for p in cmds.iterdir()), ["multi-review-join.md", "multi-review.md"])
+        self.assertTrue((shared / "SKILL.md").is_file())  # installed although ~/.agents did not exist
+        self.assertIn("shared", self.run_main())  # now both are detected: the folder is written once
+        self.run_main("--uninstall")
+        self.assertFalse(shared.exists())
+        self.assertEqual(list(cmds.iterdir()), [])
+
     def test_update_backs_up_outside_skills(self):
         self.run_main()
         (self.dest / "stale.txt").write_text("old")
