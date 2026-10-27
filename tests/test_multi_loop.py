@@ -32,11 +32,12 @@ class TempProject(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.root = self.tmp / "proj"
         self.root.mkdir()
-        self._registry = m.REGISTRY
+        self._registry, self._fallback = m.REGISTRY, m.FALLBACK_DIR
         m.REGISTRY = self.tmp / "registry" / "active.json"
+        m.FALLBACK_DIR = self.tmp / "fallback"
 
     def tearDown(self):
-        m.REGISTRY = self._registry
+        m.REGISTRY, m.FALLBACK_DIR = self._registry, self._fallback
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def create(self, agent="claude", mode="negotiated", **kw):
@@ -496,6 +497,93 @@ class Sandbox(TempProject):
     def test_dir_writable(self):
         self.assertTrue(m.dir_writable(self.root))
         self.assertEqual(list(self.root.glob(".write-probe-*")), [])
+
+    def home_denied(self, *denied):
+        # Antigravity's sandbox refused ~/.multi-review: the creator crashed (or, patched, skipped the
+        # registry) and agents started in other folders never found the session.
+        import unittest.mock as mock
+        real = m.dir_writable
+        return mock.patch.object(m, "dir_writable", lambda d: Path(d) not in denied and real(d))
+
+    def test_registry_falls_back_when_home_is_not_writable(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        m.set_session("api")
+        try:
+            with self.home_denied(m.REGISTRY.parent):
+                _, out = quiet(m.do_join, str(other), "antigravity", "5m", "1h", order_mode="random")
+        finally:
+            m.set_session(m.DEFAULT_SESSION)
+        self.assertIn("REGISTRY=", out)
+        self.assertFalse(m.REGISTRY.exists())
+        root, sess = quiet(m.resolve_root, None, "api")[0]  # another agent, other folder, home writable
+        self.assertEqual((root, sess), (str(other.resolve()), "api"))
+
+    def test_no_writable_registry_prints_the_join_command(self):
+        with self.home_denied(m.REGISTRY.parent, m.FALLBACK_DIR):
+            _, out = self.create(agent="antigravity")
+        self.assertIn("REGISTRY_UNAVAILABLE", out)
+        self.assertIn(f'--root "{self.root.resolve()}" join --agent NAME', out)
+        self.assertIn("antigravity", m.active_agents(m.load_session(str(self.root))))  # session itself works
+
+    def test_joiner_registers_what_a_sandboxed_creator_could_not(self):
+        with self.home_denied(m.REGISTRY.parent, m.FALLBACK_DIR):
+            self.create(agent="antigravity")
+        self.assertFalse(m.registered(str(self.root)))
+        self.join("claude")  # home writable: it fills in the registry and the hub's session list
+        self.assertTrue(m.registered(str(self.root)))
+        self.assertTrue(m.chat_hub.remembered(str(self.root)))
+
+    def test_sandboxed_joiner_writes_nothing_machine_wide(self):
+        self.create()
+        m.REGISTRY.unlink()
+        with self.home_denied(m.REGISTRY.parent, m.FALLBACK_DIR):
+            _, out = self.join("antigravity")
+        self.assertNotIn("REGISTRY_UNAVAILABLE", out)  # only the creator is told how others join
+        self.assertFalse(m.REGISTRY.exists())
+
+    def test_hub_opened_by_joiner_when_creator_could_not(self):
+        import unittest.mock as mock
+        calls = []
+        with mock.patch.object(m.chat_hub, "open_chat_hub", lambda root: calls.append(root) and False):
+            self.create(agent="antigravity")
+        self.assertFalse(m.load_session(str(self.root)).get("chat_opened"))
+        with mock.patch.object(m.chat_hub, "open_chat_hub", lambda root: calls.append(root) or True):
+            self.join("claude")
+            self.join("codex")  # hub was opened once; a panel the user closed is not reopened
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(m.load_session(str(self.root))["chat_opened"])
+
+    def test_antigravity_outside_root_is_told_to_open_the_folder(self):
+        self.create()
+        _, out = self.join("antigravity")  # tests run outside the temp project
+        self.assertIn("WORKSPACE_OUTSIDE_ROOT", out)
+        self.assertIn("open-ide antigravity", out)
+        _, out = self.join("gemini")
+        self.assertNotIn("WORKSPACE_OUTSIDE_ROOT", out)
+
+    def test_open_ide_starts_the_cli_on_root(self):
+        import unittest.mock as mock
+        started = []
+        with mock.patch.object(m.ide_open, "find_cli", lambda ide: "agy"), \
+                mock.patch.object(m.ide_open.subprocess, "Popen", lambda args, **kw: started.append(args)):
+            _, out = self.create(open_ide="antigravity")
+        self.assertEqual(started, [["agy", str(self.root.resolve())]])
+        self.assertIn("IDE_OPENED antigravity", out)
+        self.assertNotIn("WORKSPACE_OUTSIDE_ROOT", out)
+
+    def test_open_ide_without_cli(self):
+        import unittest.mock as mock
+        with mock.patch.object(m.ide_open, "find_cli", lambda ide: None):
+            ok, out = quiet(m.ide_open.open_ide, str(self.root), "antigravity")
+        self.assertFalse(ok)
+        self.assertIn("IDE_NOT_FOUND", out)
+
+    def test_prune_cleans_both_registries(self):
+        with self.home_denied(m.REGISTRY.parent):
+            self.create()
+        quiet(m.cmd_stop, __import__("argparse").Namespace(root=str(self.root)))
+        self.assertEqual(m.load_json(m.FALLBACK_DIR / "active.json"), [])
 
 
 class Final(TempProject):

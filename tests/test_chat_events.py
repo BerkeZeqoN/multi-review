@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 os.environ["MULTI_REVIEW_NO_CHAT"] = "1"  # creating a session must not open the chat window in tests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -86,13 +87,14 @@ class Sync(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.root = str(self.tmp / "proj")
         Path(self.root).mkdir()
-        self._registry = m.REGISTRY
+        self._registry, self._fallback = m.REGISTRY, m.FALLBACK_DIR
         m.REGISTRY = self.tmp / "registry" / "active.json"
+        m.FALLBACK_DIR = self.tmp / "fallback"
         quiet(m.do_join, self.root, "claude", "5m", "1h", file="claude-opus.md", prefix="CL", order_mode="random")
         quiet(m.do_join, self.root, "antigravity")
 
     def tearDown(self):
-        m.REGISTRY = self._registry
+        m.REGISTRY, m.FALLBACK_DIR = self._registry, self._fallback
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def events(self):
@@ -217,7 +219,7 @@ class Sync(unittest.TestCase):
             quiet(m.do_join, self.root, "codex", "5m", "1h", order_mode="random")
         finally:
             m.set_session("main")
-        m.save_json(hub.recent_path(), [{"root": self.root, "session": "docs", "created": 0}])
+        m.save_json(m.REGISTRY.with_name(hub.RECENT), [{"root": self.root, "session": "docs", "created": 0}])
         quiet(m.cmd_stop, argparse.Namespace(root=self.root))
         m.registry_prune()
         self.assertIn("main", {x["session"] for x in hub.ChatHub().sessions()})
@@ -494,6 +496,28 @@ class Window(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+class AutoOpen(unittest.TestCase):
+    def test_spawns_the_script_that_has_the_chat_command(self):
+        # chat_hub.py has no __main__: spawning it exited at once and the panel never came up.
+        calls = []
+
+        class DeadChild:
+            def poll(self):
+                return 1
+
+        def fake_popen(args, **kw):
+            calls.append(args)
+            return DeadChild()
+
+        out = io.StringIO()
+        with mock.patch.object(hub, "AUTO_CHAT", True), mock.patch.object(hub, "hub_running", return_value=None), \
+                mock.patch.object(hub.subprocess, "Popen", fake_popen), contextlib.redirect_stdout(out):
+            hub.open_chat_hub(tempfile.gettempdir())
+        self.assertEqual(Path(calls[0][1]).name, "multi_loop.py")
+        self.assertIn("chat", calls[0])
+        self.assertIn("CHAT_PANEL could not start", out.getvalue())  # a dead child is reported, not hidden
 
 
 if __name__ == "__main__":

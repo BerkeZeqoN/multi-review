@@ -23,6 +23,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import webbrowser
@@ -37,7 +38,9 @@ SAY_MAX_BYTES = 16384
 PORT_TRIES = 20           # 8777, 8778, ... when the default port is taken
 WINDOW_GRACE = 8          # seconds without a connected page before an Edge-window hub stops
 ALIVE_PING = 2            # SSE keep-alive interval; a closed window is noticed on the next write
-WINDOW_PROFILE = Path.home() / ".multi-review" / "chat-window"
+# The Edge profile of the window; the temp folder when a sandboxed agent may not write the home folder.
+WINDOW_PROFILES = [Path(os.environ.get("MULTI_REVIEW_HOME") or Path.home() / ".multi-review") / "chat-window",
+                   Path(tempfile.gettempdir()) / "multi-review" / "chat-window"]
 APP_ID = "multi-review-chat"
 # The page (HTML, CSS, JS) lives next to this file; placeholders __TOKEN__, __INITIAL__ and
 # __REPLAY_FIRST__ are filled per request.
@@ -58,13 +61,26 @@ def find_edge():
     return str(mac) if mac.is_file() else None
 
 
+def writable(folder):
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        probe = folder / f".write-probe-{os.getpid()}"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def open_window(url):
     """Edge app window with its own profile (no tabs, no address bar). Returns the process or None."""
     edge = find_edge()
     if not edge:
         return None
-    WINDOW_PROFILE.mkdir(parents=True, exist_ok=True)
-    args = [edge, f"--app={url}", "--window-size=1320,840", f"--user-data-dir={WINDOW_PROFILE}",
+    profile = next((p for p in WINDOW_PROFILES if writable(p)), None)
+    if not profile:
+        return None
+    args = [edge, f"--app={url}", "--window-size=1320,840", f"--user-data-dir={profile}",
             "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"]
     try:
         return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

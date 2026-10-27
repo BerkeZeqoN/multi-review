@@ -31,7 +31,7 @@ Commands (run from the project root, or pass --root):
           model: each round pipes a prompt into CMD (stdin) and writes the
           returned markdown into the agent's own file
 """
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 import argparse
 import contextlib
@@ -42,12 +42,14 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 import chat_events
+import ide_open
 
 if __name__ == "__main__":
     # Run as a script this module is __main__; chat_hub does `import multi_loop`. Without this alias
@@ -58,7 +60,11 @@ import chat_hub  # noqa: E402 - needs the alias above
 DIR_NAME = "multi-review"
 STATE_DIR = ".state"
 # Machine-wide list of active sessions, so `join` from any folder (any tool) finds the project.
-REGISTRY = Path.home() / ".multi-review" / "active.json"
+# MULTI_REVIEW_HOME moves it (and recent.json, hub.json) elsewhere.
+REGISTRY = Path(os.environ.get("MULTI_REVIEW_HOME") or Path.home() / ".multi-review") / "active.json"
+# Sandboxed agents (Antigravity, Codex) often may not write to the home folder: writers then fall back
+# to the temp folder, readers always look in both.
+FALLBACK_DIR = Path(tempfile.gettempdir()) / "multi-review"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,60}\.md$")
 # Names that AI tools auto-load as instructions (case-insensitive file systems make claude.md == CLAUDE.md).
@@ -207,11 +213,38 @@ def peek_session(root, session=None):
         return None
 
 
+def user_dirs():
+    return [REGISTRY.parent, FALLBACK_DIR]
+
+
+def user_file(name):
+    """`name` in the first machine-wide folder this process may write to, else None."""
+    for d in user_dirs():
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            if dir_writable(d):
+                return d / name
+        except OSError:
+            continue
+    return None
+
+
+def read_user_list(name):
+    """A machine-wide list merged from every folder; one entry per (root, session)."""
+    merged = {}
+    for d in user_dirs():
+        try:
+            items = load_json(d / name, []) or []
+        except (OSError, ValueError):
+            continue
+        for e in items:
+            if isinstance(e, dict) and e.get("root"):
+                merged[(e["root"].lower(), e.get("session", DEFAULT_SESSION))] = e
+    return list(merged.values())
+
+
 def registry_entries():
-    try:
-        return load_json(REGISTRY, []) or []
-    except (OSError, ValueError):
-        return []
+    return read_user_list(REGISTRY.name)
 
 
 def registry_active():
@@ -225,30 +258,53 @@ def registry_active():
     return out
 
 
-def registry_lock():
-    """Sessions in different projects share the registry, so its read-modify-write needs a lock too."""
-    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    return Lock(path=REGISTRY.with_suffix(".lock"))
+def registry_lock(path):
+    """Sessions in different projects share these files, so a read-modify-write needs a lock too."""
+    return Lock(path=path.with_suffix(".lock"))
 
 
 def same_session(e, root, session):
     return e["root"].lower() == root.lower() and e.get("session", DEFAULT_SESSION) == session
 
 
-def registry_add(root):
+def registered(root):
     root = str(Path(root).resolve())
-    with registry_lock():
+    return any(same_session(e, root, current_session()) for e in registry_entries())
+
+
+def registry_add(root, quiet=False):
+    root = str(Path(root).resolve())
+    target = user_file(REGISTRY.name)
+    if not target:
+        if quiet:
+            return
+        # The session works; only the lookup from other folders does not. Say how to join instead.
+        print(f"REGISTRY_UNAVAILABLE: this agent may not write {REGISTRY.parent} nor {FALLBACK_DIR}, so other "
+              "agents will not find this session by themselves. Tell the user to give every other agent "
+              "this command: " + next_cmd(root, "join --agent NAME").split("NEXT: ", 1)[1])
+        return
+    if target.parent != REGISTRY.parent:
+        print(f"REGISTRY={target} ({REGISTRY.parent} is not writable here; other agents still find it)")
+    with registry_lock(target):
         entries = [{"root": e["root"], "session": e["session"], "created": e.get("created")}
                    for e in registry_active() if not same_session(e, root, current_session())]
         entries.append({"root": root, "session": current_session(), "created": stamp(time.time())})
-        save_json(REGISTRY, entries)
+        save_json(target, entries)
 
 
 def registry_prune():
-    if REGISTRY.exists():
-        with registry_lock():
-            save_json(REGISTRY, [{"root": e["root"], "session": e["session"], "created": e.get("created")}
-                                 for e in registry_active()])
+    for d in user_dirs():
+        path = d / REGISTRY.name
+        if not path.exists() or not dir_writable(d):
+            continue  # a folder this agent may only read; the next writer there prunes it
+        with registry_lock(path):
+            try:
+                entries = load_json(path, []) or []
+            except (OSError, ValueError):
+                entries = []
+            save_json(path, [{"root": e["root"], "session": e.get("session", DEFAULT_SESSION),
+                              "created": e.get("created")} for e in entries
+                             if is_active(peek_session(e["root"], e.get("session", DEFAULT_SESSION)))])
 
 
 def cwd_sessions(cwd):
@@ -325,7 +381,7 @@ def write_denied_msg(path):
     return (f"ERROR: cannot write {path}: permission denied. The agent's sandbox most likely blocks this "
             "folder (this is not a busy lock). Codex: start Codex with the project folder as its workspace, "
             "or approve running this command outside the sandbox (also every later 'wait'). "
-            "Other tools: allow writes to the project's multi-review/ folder and ~/.multi-review/.")
+            "Other tools: allow writes to the project's multi-review/ folder.")
 
 
 class Lock:
@@ -786,6 +842,16 @@ def refuse_creator_options(root, session, **options):
           f"order_mode={session['order_mode']}, work_mode={session.get('work_mode', 'research')})")
 
 
+def heal_shared(root):
+    """A sandboxed creator (Antigravity, Codex) may have left the session out of the machine-wide files;
+    the next agent that may write them adds it, so the session is found from any folder and in the hub.
+    Agents that may not write them stay quiet and touch nothing outside the project."""
+    if not registered(root):
+        registry_add(root, quiet=True)
+    if not chat_hub.remembered(root):
+        chat_hub.remember_session(root)
+
+
 def add_agent(session, agent, file, prefix, mode, resume, now):
     """Put the agent into the session (caller holds the lock): new, rejoining, or resuming."""
     agents = session.setdefault("agents", {})
@@ -819,7 +885,7 @@ def add_agent(session, agent, file, prefix, mode, resume, now):
 
 
 def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, mode="agent", order_mode=None,
-            resume=False, goal=None, work_mode=None, areas=None):
+            resume=False, goal=None, work_mode=None, areas=None, open_ide=None):
     check_join_args(agent, file)
     now = time.time()
     with Lock(root):
@@ -832,6 +898,8 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
                                    work_mode=work_mode, areas=areas, goal=goal)
         info = add_agent(session, agent, file, prefix, mode, resume, now)
         save_json(session_path(root), session)
+    if not created:
+        heal_shared(root)
     own = review_dir(root) / info["file"]
     if not own.exists():
         own.write_text(template(agent, info), encoding="utf-8")
@@ -845,8 +913,17 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
         take_user_messages(root, agent)  # mark them shown, as a normal join does
     if earlier:
         print(user_line(earlier))
-    if created and mode != "drive":
-        chat_hub.open_chat_hub(root)  # drive sessions run headless (CI, scripts)
+    # Drive sessions run headless (CI, scripts). A creator whose sandbox blocked the hub leaves
+    # chat_opened unset, so the next agent that joins opens it; a panel the user closed stays closed.
+    if mode != "drive" and (created or not session.get("chat_opened")) and chat_hub.open_chat_hub(root):
+        with Lock(root):
+            s = load_session(root)
+            s["chat_opened"] = True
+            save_json(session_path(root), s)
+    if open_ide:
+        ide_open.open_ide(root, open_ide)
+    elif agent.startswith("antigravity") and not ide_open.inside(Path.cwd(), root):
+        print(ide_open.outside_hint(root, Path(__file__).resolve()))
     print(f"ROOT={Path(root).resolve()} SESSION={current_session()} DIR={session_rel()}")
     print(f"YOU={agent} prefix={info['prefix']} own_file={own}")
     print_clock(session)
@@ -858,7 +935,7 @@ def do_join(root, agent, interval=None, duration=None, file=None, prefix=None, m
 def cmd_join(args):
     do_join(args.root, args.agent, args.interval, args.duration, args.file, args.prefix,
             order_mode=args.order_mode, resume=args.resume, goal=args.goal,
-            work_mode=args.work_mode, areas=args.areas)
+            work_mode=args.work_mode, areas=args.areas, open_ide=args.open_ide)
 
 
 def snapshot(root, session, agent):
@@ -1542,7 +1619,12 @@ def main():
         sp.add_argument("--resume", action="store_true",
                         help="you are this already-active agent and lost your context (e.g. after /clear)")
 
-    joiner(sub.add_parser("join"))
+    jn = sub.add_parser("join")
+    joiner(jn)
+    jn.add_argument("--open-ide", choices=sorted(ide_open.IDES),
+                    help="also open this IDE on the project folder (its agent then joins without write prompts)")
+    oi = sub.add_parser("open-ide", help="open an IDE agent's window on the session's project folder")
+    oi.add_argument("ide", nargs="?", default="antigravity", choices=sorted(ide_open.IDES))
     w = sub.add_parser("wait")
     w.add_argument("--agent", required=True)
     w.add_argument("--max-wait", help="return CONTINUE_WAIT after this long (for tools with command timeouts)")
@@ -1595,7 +1677,7 @@ def main():
     {"join": cmd_join, "wait": cmd_wait, "propose": cmd_propose, "shuffle": cmd_shuffle,
      "roster": cmd_roster, "status": cmd_status, "leave": cmd_leave, "stop": cmd_stop,
      "done": cmd_done, "finalize": cmd_finalize, "drive": cmd_drive, "chat": chat_hub.cmd_chat,
-     "rename": chat_hub.cmd_rename}[args.cmd](args)
+     "rename": chat_hub.cmd_rename, "open-ide": ide_open.cmd_open_ide}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-27
+
+### Added
+- `open-ide antigravity` (and `join --open-ide antigravity` when creating) opens Antigravity on the
+  session's project folder, so its agent works inside its workspace and the IDE stops asking for
+  permission on every write of the loop. Antigravity joining from another folder gets
+  `WORKSPACE_OUTSIDE_ROOT` with that command.
+
+### Fixed
+- A session created by a sandboxed agent (Antigravity, Codex) no longer stays invisible: the next
+  agent that joins and may write the machine-wide files registers it and opens the chat panel if no
+  agent could. Sandboxed joiners still write nothing outside the project.
+- A sandbox that refuses `~/.multi-review` (Antigravity: `cannot write ...: permission denied`) no
+  longer unregisters the session: the registry, `recent.json`, `hub.json` and the panel's Edge
+  profile fall back to `%TEMP%/multi-review`, readers merge both. Nothing writable prints
+  `REGISTRY_UNAVAILABLE` with the exact `--root ... join` command for the other agents.
+- The panel did not open by itself when a session was created (the spawned process exited at
+  once); `join` now starts it and reports `CHAT_PANEL opening` only once it answers.
+
 ## [0.6.1] - 2026-10-24
 
 ### Added
@@ -137,7 +156,8 @@ All notable changes to this project are documented here. The format follows
 - First public version: N-agent review ring, shared clock, random or
   negotiated ring order, `drive` for text-only models.
 
-[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/BerkeZeqoN/multi-review/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/BerkeZeqoN/multi-review/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/BerkeZeqoN/multi-review/compare/v0.4.1...v0.5.0

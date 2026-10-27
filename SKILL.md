@@ -29,9 +29,19 @@ Only the agent that **creates** the session needs these; joining an active
 session needs nothing (`/multi-review join`).
 
 0. **project folder** - absolute path; passed once as `--root` when creating.
-   It is saved to `~/.multi-review/active.json`, so every later command from
-   any agent, in any folder, finds the project without a path. `join` prints
-   `ROOT=...`: work (read code, run tests) in that folder.
+   It is saved to `~/.multi-review/active.json` (or, when a sandbox blocks the
+   home folder, to `%TEMP%/multi-review/active.json`; both are searched), so
+   every later command from any agent, in any folder, finds the project
+   without a path. `join` prints `ROOT=...`: work (read code, run tests) in
+   that folder. If it prints `REGISTRY_UNAVAILABLE`, other agents cannot find
+   the session by themselves: show the user the command it prints, to paste
+   into every other agent. The next agent that joins and may write those
+   files registers the session (and opens the chat panel if nobody could).
+   **Antigravity in the review:** if the user names Antigravity among the
+   agents, add `--open-ide antigravity` when creating (or run `open-ide
+   antigravity` later): it opens the project folder in Antigravity, so its
+   writes stay in its workspace and it asks for no permission. Then tell the
+   user to type "multi-review oturumuna katil" in that window's agent chat.
 1. **interval** - how often each agent re-checks (e.g. `5m`, `10dk`)
 2. **duration** - total time (e.g. `2h`, `90dk`)
 3. **order mode** - **always ask the user** when creating (Claude Code: use
@@ -111,8 +121,16 @@ for the path when joining otherwise.
 **The chat panel opens by itself.** When `join` creates a session it prints
 `CHAT_PANEL opening` (a new Edge window with the live chat) or `CHAT_PANEL
 already open` (the open panel switches to the new session within seconds).
-Do nothing for it. If it prints `CHAT_PANEL could not start`, tell the user
-the command it shows. `MULTI_REVIEW_NO_CHAT=1` turns this off (CI, scripts).
+Do nothing for it. If it prints `CHAT_PANEL could not start`, or the user
+says no window came up (a sandboxed agent may not start Edge, or its child
+processes die when the command ends), tell the user to run the `chat` command
+it shows in their own terminal. Never hand out a `127.0.0.1` link yourself:
+it only works while that hub process lives. `MULTI_REVIEW_NO_CHAT=1` turns
+this off (CI, scripts).
+
+**Never edit the installed skill files** (`scripts/`, `SKILL.md`,
+`PROTOCOL.md`) to work around an error. Report the exact error line to the
+user instead; a local patch breaks the session for every other agent.
 
 Then follow PROTOCOL.md: Round 0 → `wait` → TICK rounds → final phase
 (`final_phase=yes`: the final writer drafts `multi-review/final.md`) →
@@ -133,8 +151,13 @@ and exempt from the "skip commands that take >30s" rule.
 commands time out, use `wait --agent NAME --max-wait 9m` and re-run on
 `CONTINUE_WAIT`.
 
+**Antigravity:** it asks the user before every write outside its workspace.
+If `join` prints `WORKSPACE_OUTSIDE_ROOT`, show the user that message (it
+holds the `open-ide antigravity` command) and continue only in the window it
+opens. Never answer it by moving the session or `MULTI_REVIEW_HOME`.
+
 **Codex (sandbox):** every command writes to `<ROOT>/multi-review/` (and the
-creator also to `~/.multi-review/`). Codex only writes inside its workspace, so
+creator also to `~/.multi-review/`, else the temp folder). Codex only writes inside its workspace, so
 start Codex in the project folder (`ROOT=`). If `ROOT` is elsewhere, run
 `join` and every `wait` with sandbox escalation / outside the sandbox
 (approve it once for the whole loop). `ERROR: cannot write ...: permission

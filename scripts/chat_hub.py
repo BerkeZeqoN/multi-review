@@ -46,24 +46,30 @@ RECENT_KEEP = 30
 AUTO_CHAT = os.environ.get("MULTI_REVIEW_NO_CHAT") != "1"  # tests and CI set it; `join` then opens nothing
 
 
-def recent_path():
-    return ml.REGISTRY.with_name("recent.json")
+RECENT = "recent.json"
+HUB = "hub.json"
 
 
-def hub_path():
-    return ml.REGISTRY.with_name("hub.json")
+def recent_sessions():
+    """Finished and running sessions this machine has seen, oldest first."""
+    return sorted(ml.read_user_list(RECENT), key=lambda e: e.get("created") or 0)
+
+
+def remembered(root):
+    root = str(Path(root).resolve())
+    return any(ml.same_session(e, root, ml.current_session()) for e in recent_sessions())
 
 
 def remember_session(root):
     """Finished sessions leave the registry; the hub still lists the last RECENT_KEEP of them."""
     root = str(Path(root).resolve())
-    with ml.registry_lock():
-        try:
-            old = ml.load_json(recent_path(), []) or []
-        except (OSError, ValueError):
-            old = []
+    target = ml.user_file(RECENT)
+    if not target:
+        return  # nothing machine-wide is writable here; the hub still finds running sessions
+    with ml.registry_lock(target):
+        old = recent_sessions()
         keep = [e for e in old if not ml.same_session(e, root, ml.current_session())][-(RECENT_KEEP - 1):]
-        ml.save_json(recent_path(), keep + [{"root": root, "session": ml.current_session(), "created": time.time()}])
+        ml.save_json(target, keep + [{"root": root, "session": ml.current_session(), "created": time.time()}])
 
 
 TITLE_MAX = 60
@@ -120,10 +126,7 @@ class ChatHub:
     """What chat_view.py needs, for every known session (running: registry; finished: recent.json)."""
 
     def sessions(self):
-        try:
-            recent = ml.load_json(recent_path(), []) or []
-        except (OSError, ValueError):
-            recent = []
+        recent = recent_sessions()
         seen, out, now = set(), [], time.time()
         entries = list(ml.registry_active()) + list(reversed(recent))
         for root in {str(Path(e["root"]).resolve()) for e in entries}:
@@ -170,25 +173,30 @@ class ChatHub:
 
 def hub_running():
     """Port of a live chat hub on this machine, else None."""
-    try:
-        port = int((ml.load_json(hub_path(), {}) or {}).get("port", 0))
-        if not port:
-            return None
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=1.5) as r:
-            return port if json.loads(r.read().decode("utf-8")).get("app") == "multi-review-chat" else None
-    except (OSError, ValueError):
-        return None
+    for d in ml.user_dirs():
+        try:
+            port = int((ml.load_json(d / HUB, {}) or {}).get("port", 0))
+            if not port:
+                continue
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=1.5) as r:
+                if json.loads(r.read().decode("utf-8")).get("app") == "multi-review-chat":
+                    return port
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def open_chat_hub(root):
-    """Called when a session is created: the user sees the chat without asking for it."""
+    """Called when a session is created (or joined while no agent could open it yet): the user sees the
+    chat without asking for it. True when a hub is up or starting."""
     if not AUTO_CHAT:
-        return
+        return False
     port = hub_running()
     if port:
         print(f"CHAT_PANEL already open: http://127.0.0.1:{port}/ (it switches to this session by itself)")
-        return
-    args = [sys.executable, str(Path(__file__).resolve()), "--root", str(Path(root).resolve()),
+        return True
+    # The CLI lives in multi_loop.py; this module has no __main__ and would exit at once.
+    args = [sys.executable, str(Path(ml.__file__).resolve()), "--root", str(Path(root).resolve()),
             "--session", ml.current_session(), "chat"]
     kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
           "cwd": str(Path(root).resolve())}
@@ -200,12 +208,23 @@ def open_chat_hub(root):
         attempts = [dict(kw, start_new_session=True)]
     for extra in attempts:
         try:
-            subprocess.Popen(args, **extra)
-            print("CHAT_PANEL opening: the live chat of this session (Edge window, closes with it)")
-            return
+            proc = subprocess.Popen(args, **extra)
         except OSError:
             continue
-    print("CHAT_PANEL could not start; run: " + ml.next_cmd(root, "chat").split("NEXT: ", 1)[1])
+        # Only claim the panel is opening once the hub answers; a child that dies must not go unnoticed.
+        deadline = time.time() + 8
+        while time.time() < deadline and proc.poll() is None:
+            if hub_running():
+                print("CHAT_PANEL opening: the live chat of this session (Edge window, closes with it)")
+                return True
+            time.sleep(0.25)
+        if proc.poll() is None:  # alive but slow to bind; it still opens the window
+            print("CHAT_PANEL opening: the live chat of this session (Edge window, closes with it)")
+            return True
+        break
+    print("CHAT_PANEL could not start (an agent sandbox may block it); the next agent that joins opens it, "
+          "or ask the user to run this in their own terminal: " + ml.next_cmd(root, "chat").split("NEXT: ", 1)[1])
+    return False
 
 
 def cmd_chat(args):
@@ -219,4 +238,4 @@ def cmd_chat(args):
         ml.log_events(args.root)
         remember_session(args.root)  # sessions from before 0.6.1 are not in recent.json yet
     chat_view.serve(ChatHub(), port=args.port, initial=initial, replay_first=args.replay,
-                    open_browser=not args.no_open, hub_file=None if args.no_open else hub_path())
+                    open_browser=not args.no_open, hub_file=None if args.no_open else ml.user_file(HUB))
